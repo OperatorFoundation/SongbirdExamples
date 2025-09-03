@@ -46,9 +46,9 @@
 // ============================================================================
 
 // Teensy Audio Library constants
-#define AUDIO_SAMPLE_RATE       44100
+#define TEENSY_AUDIO_SAMPLE_RATE       44100
 #define AUDIO_BITS_PER_SAMPLE   16
-#define AUDIO_MEMORY_BLOCKS     60      // Memory for audio processing
+#define AUDIO_MEMORY_BLOCKS     120      // Memory for audio processing
 #define AUDIO_BLOCK_SAMPLES     128     // Teensy Audio block size
 
 // Recording settings
@@ -57,12 +57,12 @@
 #define WAV_BUFFER_SIZE         4096     // Larger buffer for reliability
 
 // Audio levels
-#define DEFAULT_MIC_GAIN        10      // 0-63 for SGTL5000
+#define DEFAULT_MIC_GAIN       10      // 0-63 for SGTL5000
 #define MIN_MIC_GAIN           0
 #define MAX_MIC_GAIN           63
 #define GAIN_STEP              2        // Adjustment per button press
 
-#define DEFAULT_PLAYBACK_VOLUME 0.7     // 0.0-1.0
+#define DEFAULT_PLAYBACK_VOLUME 0.5     // 0.0-1.0
 #define VOLUME_STEP            0.05     // Adjustment per button press
 #define MONITOR_VOLUME         0.3      // Input monitoring level during recording
 
@@ -116,7 +116,7 @@
 // ============================================================================
 
 #define RECORDINGS_DIR         "/RECORDINGS"
-#define MAX_FILENAME_LENGTH    32
+#define RECORDER_MAX_FILENAME_LEN    32
 #define MAX_FILES_TO_SCAN     999       // Maximum recordings to index
 #define MAX_SEQUENCE_NUMBER   99999     // Maximum file sequence number
 
@@ -178,7 +178,7 @@ struct Settings {
 // ============================================================================
 
 // Uncomment for serial debug output
-// #define DEBUG_MODE
+#define DEBUG_MODE
 
 #ifdef DEBUG_MODE
   #define DEBUG_PRINT(x)     Serial.print(x)

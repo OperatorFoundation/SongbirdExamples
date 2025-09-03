@@ -49,6 +49,7 @@ public:
     static AudioOutputI2S audioOutput;
     static AudioRecordQueue recordQueue;
     static AudioPlayQueue playQueue;
+    static AudioPlaySdWav playWav;
     static AudioAnalyzePeak peakAnalyzer;
     static AudioFilterBiquad windCutFilter;
     static AudioMixer4 inputMixer;

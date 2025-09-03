@@ -95,7 +95,7 @@ bool RecordingEngine::createRecordingsDirectory()
 String RecordingEngine::generateNextFilename()
 {
     // Format: REC_NNNNN.WAV (sequential)
-    char filename[MAX_FILENAME_LENGTH];
+    char filename[RECORDER_MAX_FILENAME_LEN];
     snprintf(filename, sizeof(filename), "%s/%s%05lu%s", RECORDINGS_DIR, FILE_PREFIX, nextSequenceNumber, FILE_EXTENSION);
 
     return String(filename);
@@ -181,12 +181,21 @@ bool RecordingEngine::startRecording()
     DEBUG_PRINTF("Starting recording to %s\n", currentFileName.c_str());
 
     // Configure WAVMaker for field recording
-    wavMaker = WAVMaker::configure(currentFileName.c_str())
-        .sampleRate(RATE_44100)          // Teensy Audio Library native rate
-        .channels(MONO)                  // Mono for voice recording
-        .bitsPerSample(BITS_16)
-        .bufferSize(WAV_BUFFER_SIZE)     // Large buffer for reliability
-        .overwriteExisting(false);       // Never overwrite
+    wavMaker = WAVMaker::teensyAudioRecording(currentFileName.c_str(), false);
+    wavMaker.bufferSize(WAV_BUFFER_SIZE);
+    
+    // wavMaker = WAVMaker::configure(currentFileName.c_str())
+    //     .sampleRate(RATE_44100)          // Teensy Audio Library native rate
+    //     .channels(MONO)                  // Mono for voice recording
+    //     .bitsPerSample(BITS_16)
+    //     .bufferSize(WAV_BUFFER_SIZE)     // Large buffer for reliability
+    //     .overwriteExisting(false);       // Never overwrite
+
+    if (wavMaker.getLastError() != OK)
+    {
+        DEBUG_PRINTF("WAVMaker config error: %s\n", wavMaker.getLastErrorString());
+        return false;
+    }
 
     // Reset counters
     recordingStartTime = millis();
@@ -206,6 +215,11 @@ bool RecordingEngine::processRecording(AudioRecordQueue* queue)
 
     bool dataWritten = false;
 
+    // In processRecording(), before the while loop:
+    if (queue->available() == 0) return false; // No data to process
+
+    DEBUG_PRINTF("Processing %d audio blocks\n", queue->available());
+
     // Process all available audio blocks
     while (queue->available() > 0)
     {
@@ -218,6 +232,8 @@ bool RecordingEngine::processRecording(AudioRecordQueue* queue)
         }
         else
         {
+            DEBUG_PRINTF("WAVMaker write error: %s\n", wavMaker.getLastErrorString());
+
             // Write failed - try to save what we have
             lastError = ERROR_WRITE_FAILED;
             stopRecording();
@@ -252,6 +268,7 @@ bool RecordingEngine::stopRecording()
 
     if (success) {
         fileCount++;
+        nextSequenceNumber++;
         DEBUG_PRINTF("Recording saved: %s (%.1f seconds)\n", currentFileName.c_str(), getRecordingDuration() / 1000.0);
     }
     else
@@ -271,8 +288,11 @@ uint32_t RecordingEngine::getRecordingDuration() const
 {
     if (recording)
     {
-        return millis() - recordingStartTime;
+        return millis() - recordingStartTime;  // Current duration in ms
     }
+    
+    // If not recording, calculate from WAVMaker data
+    return (uint32_t)(wavMaker.getDuration() * 1000.0);  // Convert seconds to ms
 
     return 0;
 }

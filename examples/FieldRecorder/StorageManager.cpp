@@ -121,7 +121,7 @@ bool StorageManager::validateSettings(const Settings& settings)
     uint32_t calculatedChecksum = calculateChecksum(settings);
     if (calculatedChecksum != settings.checksum)
     {
-        DEBUG_PRINTF("Checksum mismatch: calc=%08X, stored=%08X\n", calculated, settings.checksum);
+        DEBUG_PRINTF("Checksum mismatch: calc=%08X, stored=%08X\n", calculatedChecksum, settings.checksum);
         return false;
     }
 

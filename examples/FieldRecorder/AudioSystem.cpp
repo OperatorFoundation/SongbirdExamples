@@ -11,6 +11,7 @@ AudioInputI2S AudioSystem::audioInput;
 AudioOutputI2S AudioSystem::audioOutput;
 AudioRecordQueue AudioSystem::recordQueue;
 AudioPlayQueue AudioSystem::playQueue;
+AudioPlaySdWav AudioSystem::playWav;
 AudioAnalyzePeak AudioSystem::peakAnalyzer;
 AudioFilterBiquad AudioSystem::windCutFilter;
 AudioMixer4 AudioSystem::inputMixer;
@@ -24,7 +25,7 @@ static bool initializeAudioConnections()
     static AudioConnection patchCord2(AudioSystem::windCutFilter, 0, AudioSystem::recordQueue, 0);
     static AudioConnection patchCord3(AudioSystem::windCutFilter, 0, AudioSystem::peakAnalyzer, 0);
     static AudioConnection patchCord4(AudioSystem::windCutFilter, 0, AudioSystem::inputMixer, 0);
-    static AudioConnection patchCord5(AudioSystem::playQueue, 0, AudioSystem::outputMixer, 0);
+    static AudioConnection patchCord5(AudioSystem::playWav, 0, AudioSystem::outputMixer, 0);
     static AudioConnection patchCord6(AudioSystem::inputMixer, 0, AudioSystem::outputMixer, 1);
     static AudioConnection patchCord7(AudioSystem::outputMixer, 0, AudioSystem::audioOutput, 0);
     static AudioConnection patchCord8(AudioSystem::outputMixer, 0, AudioSystem::audioOutput, 1);
@@ -64,7 +65,7 @@ bool AudioSystem::begin()
     updateWindCutFilter();
 
     // Set initial mixer levels
-    outputMixer.gain(0, playbackVolume);          // Playback channel
+    outputMixer.gain(0, playbackVolume);     // Playback channel
     outputMixer.gain(1, 0.0);                // Monitor channel (off initially)
     outputMixer.gain(2, 0.0);                // Unused
     outputMixer.gain(3, 0.0);                // Unused
@@ -73,6 +74,8 @@ bool AudioSystem::begin()
     inputMixer.gain(1, 0.0);                 // Unused
     inputMixer.gain(2, 0.0);                 // Unused
     inputMixer.gain(3, 0.0);                 // Unused
+
+    recordQueue.begin();
 
     DEBUG_PRINTLN("Audio system initialized");
     return true;
