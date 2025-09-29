@@ -34,6 +34,45 @@ Perfect for investigative journalism, interviews, and any field recording scenar
 2. Copy the folder to your Arduino libraries directory
 3. Restart Arduino IDE
 
+## Usage
+
+### Starting a Recording
+1. Press **UP** button
+2. Wait for 3-second countdown
+3. Recording begins automatically
+
+### Stopping a Recording
+Hold **UP** button for 2 seconds while recording
+
+### Adjusting Audio During Recording
+
+**When AGC is enabled:**
+- Press **LEFT** to toggle wind-cut filter on/off (100Hz high-pass filter for outdoor recording)
+
+**When using manual gain:**
+- Press **LEFT** to decrease microphone gain
+- Press **RIGHT** to increase microphone gain
+
+Manual gain adjustments disable AGC automatically and persist between recordings.
+
+### Enabling AGC
+When idle, hold **LEFT** + **RIGHT** together for 2 seconds to re-enable automatic gain control
+
+### Accessing Recordings
+All recordings are saved as standard WAV files in the `/RECORDINGS/` directory on the microSD card. These files can be transferred to a computer and played using any standard audio software, providing immediate access to your recordings while on-device playback features continue development.
+
+### Playback (Experimental)
+On-device playback is under active development as the WAVMaker library and playback functionality are refined.
+
+**When idle:**
+- Press **LEFT** or **RIGHT** to browse recordings
+- Press **DOWN** to play selected recording
+
+**During playback:**
+- Press **LEFT** or **RIGHT** to adjust headphone volume
+- Press **DOWN** to skip to next recording
+- Press **UP** to stop
+
 ## License
 
 MIT License - see LICENSE file for details
