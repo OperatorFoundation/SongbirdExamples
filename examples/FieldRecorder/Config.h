@@ -41,6 +41,11 @@
 #define SCREEN_WIDTH     128
 #define SCREEN_HEIGHT    32
 
+// Headphones
+#define HPAMP_VOL_CLK   52
+#define HPAMP_VOL_UD     5
+#define HPAMP_SHUTDOWN  45
+
 // ============================================================================
 // Audio Configuration
 // ============================================================================

@@ -146,7 +146,9 @@ bool PlaybackEngine::startPlayback(AudioPlaySdWav* playWav)
     }
 
     // Start playing the current file
-    if (playWav->play(fileList[currentFileIndex].c_str())) {
+    if (playWav->play(fileList[currentFileIndex].c_str())) 
+    {
+        digitalWrite(HPAMP_SHUTDOWN, LOW); // Enable amp when starting playback
         DEBUG_PRINTF("Started playback: %s\n", fileList[currentFileIndex].c_str());
         
         // Wait a moment for the file info to be available
@@ -164,7 +166,8 @@ bool PlaybackEngine::stopPlayback(AudioPlaySdWav* playWav)
     if (!playWav) return false;
     
     if (playWav->isPlaying()) {
-        playWav->stop();
+        playWav->stop();  
+        digitalWrite(HPAMP_SHUTDOWN, HIGH);  // Disable amp when stopping playback
         DEBUG_PRINTLN("Playback stopped");
         return true;
     }

@@ -58,6 +58,24 @@ bool AudioSystem::begin()
         return false;
     }
 
+    // Initialize headphone amp pins
+    pinMode(HPAMP_VOL_CLK, OUTPUT);
+    pinMode(HPAMP_VOL_UD, OUTPUT);
+    pinMode(HPAMP_SHUTDOWN, OUTPUT);
+
+    digitalWrite(HPAMP_VOL_CLK, LOW);
+    digitalWrite(HPAMP_VOL_UD, LOW);
+
+    // Enable headphone amp and set to medium volume
+    enableHeadphoneAmp(true);
+    headphoneVolumeSteps = 12;  // Start at mid-level
+
+    // Set initial headphone amp volume
+    for (int i = 0; i < 12; i++) 
+    {
+        headphoneVolumeUp();  // This will set it to the right level
+    }
+
     // Configure the codec
     configureCodec();
 
@@ -88,7 +106,8 @@ void AudioSystem::configureCodec()
     audioShield.micGain(currentGain);
 
     // Set output level (headphone)
-    audioShield.volume(0.7);
+    // Use line output since we have external headphone amp
+    audioShield.lineOutLevel(13);  // Maximum line output for clean signal to external amp
 
     // Enable AGC if appropriate
     if (agcEnabled)
@@ -211,6 +230,39 @@ void AudioSystem::setPlaybackVolume(float volume)
     outputMixer.gain(0, playbackVolume);
 
     DEBUG_PRINTF("Playback volume: %.2f\n", playbackVolume);
+}
+
+void AudioSystem::enableHeadphoneAmp(bool enable)
+{
+    digitalWrite(HPAMP_SHUTDOWN, enable ? LOW : HIGH);  // LOW = enabled
+}
+
+void AudioSystem::headphoneVolumeUp()
+{
+    if (headphoneVolumeSteps < 15) {  // 16 levels (0-15)
+        digitalWrite(HPAMP_VOL_UD, HIGH);
+        // Clock pulse
+        digitalWrite(HPAMP_VOL_CLK, LOW);
+        delay(1);
+        digitalWrite(HPAMP_VOL_CLK, HIGH);
+        delay(1);
+        digitalWrite(HPAMP_VOL_CLK, LOW);
+        headphoneVolumeSteps++;
+    }
+}
+
+void AudioSystem::headphoneVolumeDown()
+{
+    if (headphoneVolumeSteps > 0) {
+        digitalWrite(HPAMP_VOL_UD, LOW);
+        // Clock pulse  
+        digitalWrite(HPAMP_VOL_CLK, LOW);
+        delay(1);
+        digitalWrite(HPAMP_VOL_CLK, HIGH);
+        delay(1);
+        digitalWrite(HPAMP_VOL_CLK, LOW);
+        headphoneVolumeSteps--;
+    }
 }
 
 float AudioSystem::getPeakLevel()

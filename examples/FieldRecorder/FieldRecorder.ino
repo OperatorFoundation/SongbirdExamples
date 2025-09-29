@@ -572,19 +572,13 @@ void handleButtonEvents()
                     else if (btn == BTN_UP) stopPlayback();
                     else if (btn == BTN_LEFT) 
                     {
-                        currentSettings.playbackVolume = max(0.0f, currentSettings.playbackVolume - VOLUME_STEP);
-                        audioSystem.setPlaybackVolume(currentSettings.playbackVolume);
-                        storage.saveSettings(currentSettings);
-                        showVolumeOverlay = true;
-                        volumeDisplayTimer = 0;
+                        audioSystem.headphoneVolumeDown();
+                        // Remove the software volume code since we want hardware control
                     }
                     else if (btn == BTN_RIGHT) 
                     {
-                        currentSettings.playbackVolume = min(1.0f, currentSettings.playbackVolume + VOLUME_STEP);
-                        audioSystem.setPlaybackVolume(currentSettings.playbackVolume);
-                        storage.saveSettings(currentSettings);
-                        showVolumeOverlay = true;
-                        volumeDisplayTimer = 0;
+                        audioSystem.headphoneVolumeUp();
+                        // Remove the software volume code since we want hardware control
                     }
                     break;
 
