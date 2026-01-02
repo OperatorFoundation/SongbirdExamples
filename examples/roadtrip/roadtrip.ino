@@ -37,6 +37,7 @@
 #include <Bounce.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include "splash.h"
 
 // ============================================================
 // Hardware Pin Definitions
@@ -126,9 +127,11 @@ unsigned long lastDisplayUpdate = 0;
 unsigned long playStartTime = 0;
 int scrollOffset = 0;
 unsigned long lastScrollTime = 0;
+unsigned long currentTrackLengthMs = 0;
 
 // Volume control state
-int currentVolume = 40;  // Start at reasonable level (0-100)
+int currentVolume = 50;
+int currentHpAmpStep = 0;
 unsigned long upPressTime = 0;
 unsigned long downPressTime = 0;
 unsigned long lastVolumeChange = 0;
@@ -163,19 +166,16 @@ void showVolumeOverlay();
 void setup() {
   Serial.begin(115200);
   
-  // LEDs
   pinMode(LED_1, OUTPUT);
   pinMode(LED_2, OUTPUT);
   digitalWrite(LED_1, LOW);
   digitalWrite(LED_2, HIGH);
   
-  // Buttons
   pinMode(SW_LEFT_PIN,  INPUT_PULLUP);
   pinMode(SW_RIGHT_PIN, INPUT_PULLUP);
   pinMode(SW_UP_PIN,    INPUT_PULLUP);
   pinMode(SW_DOWN_PIN,  INPUT_PULLUP);
   
-  // Display
   Wire1.begin();
   if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
     Serial.println("SSD1306 failed");
@@ -184,11 +184,10 @@ void setup() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 12);
-  display.println("  ROADTRIP MP3");
-  display.display();
   
-  // Audio
+  // Play cinematic splash screen
+  playSplashScreen(display);
+  
   AudioMemory(20);
   
   if (!codec.enable()) {
@@ -199,16 +198,13 @@ void setup() {
     while (1);
   }
   
-  // Configure codec for line out to external headphone amp
-  // This matches the working FieldRecorder configuration
-  codec.inputSelect(AUDIO_INPUT_LINEIN);  // Select an input to avoid floating noise
-  codec.lineOutLevel(13);                  // 13 = 3.16Vpp (loudest setting)
-  codec.unmuteLineout();                   // Make sure line out is enabled
+  codec.inputSelect(AUDIO_INPUT_LINEIN);
+  codec.lineOutLevel(13);
+  codec.unmuteLineout();
   
-  // Initialize mixer gains - this controls our volume
-  setVolume(currentVolume);
+  mixerL.gain(0, 0.0);
+  mixerR.gain(0, 0.0);
   
-  // SD Card
   SPI.setMOSI(11);
   SPI.setMISO(12);
   SPI.setSCK(13);
@@ -223,16 +219,18 @@ void setup() {
     while (1);
   }
   
-  // Headphone amp
   setupHeadphoneAmp();
   
-  // Scan for albums
   display.clearDisplay();
-  display.setCursor(0, 12);
-  display.println("Scanning albums...");
+  display.setTextSize(1);
+  display.setCursor(20, 12);
+  display.println("Scanning...");
   display.display();
   
   scanAlbums();
+  
+  // Ensure scanning message is visible for at least 1 second
+  delay(1000);
   
   if (albumCount == 0) {
     display.clearDisplay();
@@ -246,7 +244,6 @@ void setup() {
     while (1);
   }
   
-  // Load first album
   loadAlbumTracks(0);
   
   if (trackCount > 0) {
@@ -267,7 +264,6 @@ void loop() {
   
   unsigned long now = millis();
   
-  // --- UP button: short = next album, long/hold = volume up ---
   if (btnUp.fallingEdge()) {
     upPressTime = now;
     upHeld = false;
@@ -290,7 +286,6 @@ void loop() {
     upHeld = false;
   }
   
-  // --- DOWN button: short = play/pause, long/hold = volume down ---
   if (btnDown.fallingEdge()) {
     downPressTime = now;
     downHeld = false;
@@ -313,12 +308,10 @@ void loop() {
     downHeld = false;
   }
   
-  // --- RIGHT button: next track ---
   if (btnRight.fallingEdge()) {
     nextTrack();
   }
   
-  // --- LEFT button: restart/previous track ---
   if (btnLeft.fallingEdge()) {
     unsigned long playTime = now - playStartTime;
     
@@ -333,12 +326,10 @@ void loop() {
     lastLeftPress = now;
   }
   
-  // Check if track ended
   if (isPlaying && !isPaused && !mp3.isPlaying()) {
     nextTrack();
   }
   
-  // Update display
   if (millis() - lastDisplayUpdate > 100) {
     lastDisplayUpdate = millis();
     updateDisplay();
@@ -349,46 +340,112 @@ void loop() {
 // ============================================================
 // Volume Control
 // ============================================================
-// Mixer gain range - constrained to safe listening levels
-#define VOLUME_GAIN_MAX  0.15  // Max gain at 100% volume
+#define VOLUME_DISPLAY_MIN 0
+#define VOLUME_DISPLAY_MAX 100
+#define HPAMP_STEP_AT_100  2
+#define HPAMP_STEP_AT_75   0
+#define HPAMP_STEP_AT_50  -5
+#define HPAMP_STEP_AT_25  -11
+#define LINEOUT_LOUDEST  13
+#define LINEOUT_QUIETEST 31
 
 void setVolume(int vol) {
-  currentVolume = constrain(vol, 0, 100);
-  
-  // Use exponential curve for more usable volume range
-  // This gives finer control at low volumes where ears are more sensitive
-  // Formula: gain = MAX * (e^(k*x) - 1) / (e^k - 1)
-  // where x is 0-1 and k controls the curve steepness
-  
-  float x = currentVolume / 100.0;
-  float gain;
+  currentVolume = constrain(vol, VOLUME_DISPLAY_MIN, VOLUME_DISPLAY_MAX);
   
   if (currentVolume == 0) {
-    gain = 0.0;
+    mixerL.gain(0, 0.0);
+    mixerR.gain(0, 0.0);
+    Serial.println("Volume: 0% (muted)");
   } else {
-    // Attempt exposure curve: k=4 gives good low-end detail
-    // At 50% input, this yields roughly 5% of max output
-    const float k = 4.0;
-    gain = VOLUME_GAIN_MAX * (exp(k * x) - 1.0) / (exp(k) - 1.0);
+    int targetHpStep;
+    int lineOutLevel = LINEOUT_LOUDEST;
+    float mixerGain = 1.0;
+    
+    if (currentVolume >= 75) {
+      targetHpStep = map(currentVolume, 75, 100, HPAMP_STEP_AT_75, HPAMP_STEP_AT_100);
+      lineOutLevel = LINEOUT_LOUDEST;
+      mixerGain = 1.0;
+    } else if (currentVolume >= 50) {
+      targetHpStep = map(currentVolume, 50, 75, HPAMP_STEP_AT_50, HPAMP_STEP_AT_75);
+      lineOutLevel = LINEOUT_LOUDEST;
+      mixerGain = 1.0;
+    } else if (currentVolume >= 25) {
+      targetHpStep = map(currentVolume, 25, 50, HPAMP_STEP_AT_25, HPAMP_STEP_AT_50);
+      lineOutLevel = LINEOUT_LOUDEST;
+      mixerGain = 1.0;
+    } else if (currentVolume >= 10) {
+      targetHpStep = HPAMP_STEP_AT_25;
+      lineOutLevel = map(currentVolume, 10, 24, LINEOUT_LOUDEST, LINEOUT_QUIETEST);
+      lineOutLevel = constrain(lineOutLevel, LINEOUT_LOUDEST, LINEOUT_QUIETEST);
+      mixerGain = 1.0;
+    } else {
+      targetHpStep = HPAMP_STEP_AT_25;
+      lineOutLevel = LINEOUT_QUIETEST;
+      mixerGain = currentVolume / 10.0;
+    }
+    
+    mixerL.gain(0, mixerGain);
+    mixerR.gain(0, mixerGain);
+    setHpAmpToStep(targetHpStep);
+    codec.lineOutLevel(lineOutLevel);
+    
+    Serial.print("Volume: ");
+    Serial.print(currentVolume);
+    Serial.print("% (HP step: ");
+    Serial.print(currentHpAmpStep);
+    Serial.print(", lineOut: ");
+    Serial.print(lineOutLevel);
+    Serial.print(", mixer: ");
+    Serial.print(mixerGain, 2);
+    Serial.println(")");
   }
   
-  mixerL.gain(0, gain);
-  mixerR.gain(0, gain);
-  
   volumeDisplayUntil = millis() + VOLUME_DISPLAY_MS;
-  Serial.print("Volume: ");
-  Serial.print(currentVolume);
-  Serial.print("% (gain: ");
-  Serial.print(gain, 4);
-  Serial.println(")");
+}
+
+void setHpAmpToStep(int targetStep) {
+  targetStep = constrain(targetStep, -11, 4);
+  
+  while (currentHpAmpStep < targetStep) {
+    hpAmpStepUp();
+    currentHpAmpStep++;
+  }
+  while (currentHpAmpStep > targetStep) {
+    hpAmpStepDown();
+    currentHpAmpStep--;
+  }
+}
+
+void hpAmpStepUp() {
+  digitalWrite(HPAMP_VOL_UD, HIGH);
+  digitalWrite(HPAMP_VOL_CLK, LOW);
+  delayMicroseconds(100);
+  digitalWrite(HPAMP_VOL_CLK, HIGH);
+  delayMicroseconds(100);
+  digitalWrite(HPAMP_VOL_CLK, LOW);
+}
+
+void hpAmpStepDown() {
+  digitalWrite(HPAMP_VOL_UD, LOW);
+  digitalWrite(HPAMP_VOL_CLK, LOW);
+  delayMicroseconds(100);
+  digitalWrite(HPAMP_VOL_CLK, HIGH);
+  delayMicroseconds(100);
+  digitalWrite(HPAMP_VOL_CLK, LOW);
 }
 
 void volumeUp() {
-  setVolume(currentVolume + 5);
+  if (currentVolume < VOLUME_DISPLAY_MAX) {
+    int step = (currentVolume < 25) ? 1 : 5;
+    setVolume(currentVolume + step);
+  }
 }
 
 void volumeDown() {
-  setVolume(currentVolume - 5);
+  if (currentVolume > VOLUME_DISPLAY_MIN) {
+    int step = (currentVolume <= 25) ? 1 : 5;
+    setVolume(currentVolume - step);
+  }
 }
 
 // ============================================================
@@ -416,7 +473,6 @@ void scanAlbums() {
   }
   root.close();
   
-  // Sort albums alphabetically
   for (int i = 0; i < albumCount - 1; i++) {
     for (int j = i + 1; j < albumCount; j++) {
       if (strcasecmp(albums[i].name, albums[j].name) > 0) {
@@ -435,8 +491,6 @@ void loadAlbumTracks(int albumIndex) {
   trackCount = 0;
   currentAlbum = albumIndex;
   currentTrack = 0;
-  
-  // Clear track name so old track doesn't show
   tracks[0].name[0] = '\0';
   
   char path[MAX_NAME_LEN + 2];
@@ -467,7 +521,6 @@ void loadAlbumTracks(int albumIndex) {
   }
   dir.close();
   
-  // Sort tracks alphabetically
   for (int i = 0; i < trackCount - 1; i++) {
     for (int j = i + 1; j < trackCount; j++) {
       if (strcasecmp(tracks[i].name, tracks[j].name) > 0) {
@@ -500,6 +553,20 @@ void playTrack(int trackIndex) {
   
   Serial.print("Playing: ");
   Serial.println(filepath);
+  
+  File f = SD.open(filepath);
+  if (f) {
+    unsigned long fileSize = f.size();
+    f.close();
+    currentTrackLengthMs = (fileSize * 1000UL) / 24000UL;
+    Serial.print("File size: ");
+    Serial.print(fileSize);
+    Serial.print(" bytes, estimated length: ");
+    Serial.print(currentTrackLengthMs / 1000);
+    Serial.println(" seconds");
+  } else {
+    currentTrackLengthMs = 0;
+  }
   
   mp3.stop();
   delay(10);
@@ -598,12 +665,10 @@ void togglePause() {
 String getDisplayName(const char* filename) {
   String name = String(filename);
   
-  // Remove .mp3 extension
   if (name.endsWith(".mp3") || name.endsWith(".MP3")) {
     name = name.substring(0, name.length() - 4);
   }
   
-  // Remove leading numbers and separators
   unsigned int start = 0;
   while (start < name.length() && (isDigit(name[start]) || name[start] == '_' || name[start] == '-' || name[start] == ' ')) {
     start++;
@@ -612,7 +677,6 @@ String getDisplayName(const char* filename) {
     name = name.substring(start);
   }
   
-  // Replace underscores with spaces
   name.replace('_', ' ');
   
   return name;
@@ -628,10 +692,11 @@ void showVolumeOverlay() {
   display.setCursor(xPos, 10);
   display.print(currentVolume);
   
-  // Volume bar at bottom
   display.drawRect(4, 26, 120, 6, SSD1306_WHITE);
   int barWidth = (currentVolume * 116) / 100;
-  display.fillRect(6, 28, barWidth, 2, SSD1306_WHITE);
+  if (barWidth > 0) {
+    display.fillRect(6, 28, barWidth, 2, SSD1306_WHITE);
+  }
   
   display.setTextSize(1);
   if (currentVolume == 0) {
@@ -643,14 +708,12 @@ void showVolumeOverlay() {
 void updateDisplay() {
   display.clearDisplay();
   
-  // Show volume overlay if recently changed
   if (millis() < volumeDisplayUntil) {
     showVolumeOverlay();
     display.display();
     return;
   }
   
-  // Line 1: Album name
   display.setTextSize(1);
   display.setCursor(0, 0);
   
@@ -663,7 +726,6 @@ void updateDisplay() {
   }
   display.println(albumDisplay);
   
-  // Line 2: Track name
   display.setCursor(0, 10);
   
   if (trackCount == 0 || tracks[currentTrack].name[0] == '\0') {
@@ -685,13 +747,12 @@ void updateDisplay() {
     display.println(trackName);
   }
   
-  // Line 3: Progress bar and time
   display.setCursor(0, 20);
   
   String trackInfo = String(currentTrack + 1) + "/" + String(trackCount);
   display.print(trackInfo);
   
-  display.setCursor(40, 20);
+  display.setCursor(36, 20);
   if (isPaused) {
     display.print("||");
   } else if (isPlaying) {
@@ -701,24 +762,101 @@ void updateDisplay() {
   }
   
   if (isPlaying) {
-    unsigned long ms = mp3.positionMillis();
-    int secs = ms / 1000;
-    int mins = secs / 60;
-    secs = secs % 60;
+    unsigned long elapsedMs = millis() - playStartTime;
+    int totalSecs = elapsedMs / 1000;
+    int mins = totalSecs / 60;
+    int secs = totalSecs % 60;
     
-    display.setCursor(56, 20);
+    display.setCursor(50, 20);
     if (mins < 10) display.print("0");
     display.print(mins);
     display.print(":");
     if (secs < 10) display.print("0");
     display.print(secs);
+  } else {
+    display.setCursor(50, 20);
+    display.print("--:--");
   }
   
-  // Progress animation
-  display.drawRect(88, 20, 40, 8, SSD1306_WHITE);
+  // Joust-style bird animation
   if (isPlaying && !isPaused) {
-    int progress = (millis() / 100) % 36;
-    display.fillRect(90, 22, progress, 4, SSD1306_WHITE);
+    int cycleTime = 4000;
+    int phase = (millis() % cycleTime);
+    int xPos;
+    float yPos;
+    int yBase = 23;  // Centered on bottom line
+    bool facingRight;
+    
+    if (phase < cycleTime / 2) {
+      xPos = 90 + (phase * 28) / (cycleTime / 2);
+      facingRight = true;
+    } else {
+      xPos = 118 - ((phase - cycleTime / 2) * 28) / (cycleTime / 2);
+      facingRight = false;
+    }
+    
+    // Smooth flying motion - gentle sine wave centered on baseline
+    int flapCycle = 600;  // Time for one full flap cycle
+    int flapPhase = (millis() % flapCycle);
+    
+    // Smooth sine wave motion, centered on yBase
+    float angle = (flapPhase / (float)flapCycle) * 2.0 * 3.14159;
+    float lift = sin(angle) * 2.0;  // +/- 2 pixels from center
+    
+    // Wing position based on vertical velocity (derivative of sine is cosine)
+    bool wingUp = cos(angle) < 0;  // Wing up when moving down
+    
+    int yHop = yBase + (int)lift;
+    
+    if (facingRight) {
+      // Body (smaller, 3x2)
+      display.fillRect(xPos, yHop + 2, 3, 2, SSD1306_WHITE);
+      // Head
+      display.fillRect(xPos + 2, yHop + 1, 2, 2, SSD1306_WHITE);
+      // Beak
+      display.drawPixel(xPos + 4, yHop + 1, SSD1306_WHITE);
+      // Eye
+      display.drawPixel(xPos + 3, yHop + 1, SSD1306_BLACK);
+      // Tail
+      display.drawPixel(xPos - 1, yHop + 2, SSD1306_WHITE);
+      // Wing (more dramatic flap)
+      if (wingUp) {
+        display.drawPixel(xPos + 1, yHop + 1, SSD1306_WHITE);
+        display.drawPixel(xPos + 1, yHop, SSD1306_WHITE);
+        display.drawPixel(xPos, yHop - 1, SSD1306_WHITE);
+        display.drawPixel(xPos + 1, yHop - 1, SSD1306_WHITE);
+      } else {
+        display.drawPixel(xPos + 1, yHop + 4, SSD1306_WHITE);
+        display.drawPixel(xPos, yHop + 5, SSD1306_WHITE);
+        display.drawPixel(xPos + 1, yHop + 5, SSD1306_WHITE);
+      }
+      // Legs (tucked while flying)
+      display.drawPixel(xPos + 1, yHop + 4, SSD1306_WHITE);
+    } else {
+      // Body (smaller, 3x2)
+      display.fillRect(xPos, yHop + 2, 3, 2, SSD1306_WHITE);
+      // Head
+      display.fillRect(xPos - 1, yHop + 1, 2, 2, SSD1306_WHITE);
+      // Beak
+      display.drawPixel(xPos - 2, yHop + 1, SSD1306_WHITE);
+      // Eye
+      display.drawPixel(xPos - 1, yHop + 1, SSD1306_BLACK);
+      // Tail
+      display.drawPixel(xPos + 3, yHop + 2, SSD1306_WHITE);
+      // Wing (more dramatic flap)
+      if (wingUp) {
+        display.drawPixel(xPos + 1, yHop + 1, SSD1306_WHITE);
+        display.drawPixel(xPos + 1, yHop, SSD1306_WHITE);
+        display.drawPixel(xPos + 2, yHop - 1, SSD1306_WHITE);
+        display.drawPixel(xPos + 1, yHop - 1, SSD1306_WHITE);
+      } else {
+        display.drawPixel(xPos + 1, yHop + 4, SSD1306_WHITE);
+        display.drawPixel(xPos + 2, yHop + 5, SSD1306_WHITE);
+        display.drawPixel(xPos + 1, yHop + 5, SSD1306_WHITE);
+      }
+      // Legs (tucked while flying)
+      display.drawPixel(xPos + 1, yHop + 4, SSD1306_WHITE);
+    }
   }
   
   display.display();
@@ -743,7 +881,7 @@ void updateLEDs() {
 }
 
 // ============================================================
-// Headphone Amplifier
+// Headphone Amplifier Setup
 // ============================================================
 void setupHeadphoneAmp() {
   pinMode(HPAMP_VOL_CLK, OUTPUT);
@@ -757,13 +895,9 @@ void setupHeadphoneAmp() {
   
   digitalWrite(HPAMP_SHUTDOWN, LOW);
   
-  // Volume up 4 steps (+12dB)
-  digitalWrite(HPAMP_VOL_UD, HIGH);
-  for (int i = 0; i < 4; i++) {
-    digitalWrite(HPAMP_VOL_CLK, LOW);
-    delay(10);
-    digitalWrite(HPAMP_VOL_CLK, HIGH);
-    delay(10);
-  }
-  digitalWrite(HPAMP_VOL_CLK, LOW);
+  currentHpAmpStep = 0;
+  
+  setVolume(currentVolume);
+  
+  Serial.println("Headphone amp initialized");
 }
