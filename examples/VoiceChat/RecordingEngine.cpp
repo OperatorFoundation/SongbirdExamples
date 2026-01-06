@@ -46,10 +46,12 @@ bool RecordingEngine::begin()
             String name = entry.name();
             entry.close();
 
-            // Parse MSG_NNNNN.opus
+            // Parse MSG_NNNNN_CHx.opus
             if (name.startsWith("MSG_") && name.endsWith(".opus"))
             {
-                uint32_t num = name.substring(4, 9).toInt();
+                // Extract sequence number (characters 4-8)
+                String numStr = name.substring(4, 9);
+                uint32_t num = numStr.toInt();
                 if (num > highest) highest = num;
             }
         }
@@ -57,7 +59,7 @@ bool RecordingEngine::begin()
         nextSequenceNumber = highest + 1;
     }
 
-    DEBUG_PRINTF("RecordingEngine initialized, next seq: %d\n", nextSequenceNumber);
+    DEBUG_PRINTF("RecordingEngine initialized, next seq: %lu\n", nextSequenceNumber);
     return true;
 }
 
@@ -109,7 +111,8 @@ bool RecordingEngine::createDirectories()
 String RecordingEngine::generateFilename(uint8_t channel)
 {
     // Format: /TX/MSG_NNNNN_CHx.opus
-    char filename[32];
+    // Note: channel parameter is 0-indexed, but we display as 1-indexed
+    char filename[48];
     snprintf(filename, sizeof(filename), "%s/MSG_%05lu_CH%d.opus",
              TX_DIR, nextSequenceNumber, channel + 1);
     return String(filename);
@@ -144,7 +147,13 @@ bool RecordingEngine::startRecording(uint8_t channel)
 
     // Write file header (simple magic + version)
     const uint8_t header[] = {'O', 'P', 'U', 'S', 0x01, 0x00};  // "OPUS" + version 1.0
-    currentFile.write(header, sizeof(header));
+    if (currentFile.write(header, sizeof(header)) != sizeof(header))
+    {
+        DEBUG_PRINTLN("Failed to write header");
+        currentFile.close();
+        lastError = ERROR_WRITE_FAILED;
+        return false;
+    }
     bytesWritten = sizeof(header);
 
     // Reset codec state
@@ -155,6 +164,7 @@ bool RecordingEngine::startRecording(uint8_t channel)
     packetCount = 0;
     recording = true;
 
+    DEBUG_PRINTLN("Recording started successfully");
     return true;
 }
 
@@ -227,7 +237,7 @@ bool RecordingEngine::writePacket(const uint8_t* packet, size_t size)
     bytesWritten += 2 + size;
     packetCount++;
 
-    // Flush periodically
+    // Flush periodically (every 50 packets = ~1 second of audio)
     if (packetCount % 50 == 0)
     {
         currentFile.flush();
@@ -263,9 +273,10 @@ uint32_t RecordingEngine::getRecordingDuration() const
 {
     if (recording)
     {
+        // While recording, return elapsed time
         return millis() - recordingStartTime;
     }
-    // Estimate from packet count (each packet = 20ms)
+    // After recording, estimate from packet count (each packet = 20ms)
     return packetCount * OPUS_FRAME_MS;
 }
 

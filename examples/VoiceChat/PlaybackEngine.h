@@ -42,6 +42,7 @@ public:
     bool skipToNext();
 
     // Process loop - call this regularly to feed audio
+    // Returns false when playback is complete
     bool processPlayback(AudioPlayQueue* playQueue);
 
     // State queries
@@ -72,7 +73,7 @@ private:
     // Current file
     File currentFile;
     String currentSender;
-    uint32_t fileStartTime;
+    uint32_t playbackStartTime;
     uint32_t totalPackets;
     uint32_t packetsPlayed;
     bool fileHeaderRead;

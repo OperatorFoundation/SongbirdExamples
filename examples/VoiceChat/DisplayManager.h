@@ -27,6 +27,7 @@ public:
     void showChannelSwitch(uint8_t channelNum, uint8_t queuedMessages);
     void showDisconnected();
     void showErrorScreen(ErrorType error);
+    void showUserListScreen(const char** users, uint8_t userCount, uint8_t scrollOffset);
 
     // Special displays
     void showStartupScreen();

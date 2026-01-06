@@ -13,23 +13,15 @@ DisplayManager::DisplayManager() :
 
 bool DisplayManager::begin()
 {
-    // Step up 3.3V VCC, I2C address, hard reset screen, don't initialize I2C
-    if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS, true, false))
+    if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS))
     {
         return false;
     }
 
-    delay(50);
-
     // Rotate display 180 degrees
     display.setRotation(2);
 
-    delay(50);
-
     display.clearDisplay();
-
-    delay(50);
-
     display.setTextColor(SSD1306_WHITE);
     return true;
 }
@@ -179,6 +171,56 @@ void DisplayManager::showErrorScreen(ErrorType error)
         default:
             centerText("Unknown error", 12);
             break;
+    }
+}
+
+void DisplayManager::showUserListScreen(const char** users, uint8_t userCount, uint8_t scrollOffset)
+{
+    display.clearDisplay();
+    display.setTextSize(1);
+    
+    // Title
+    display.setCursor(0, 0);
+    display.print("Users Online (");
+    display.print(userCount);
+    display.print(")");
+    
+    if (userCount == 0)
+    {
+        display.setCursor(0, 12);
+        display.print("(none)");
+    }
+    else
+    {
+        // Show up to 3 users with scrolling (screen is 32px, title takes ~10px)
+        uint8_t maxVisible = 2;
+        uint8_t displayed = 0;
+        
+        for (uint8_t i = scrollOffset; i < userCount && displayed < maxVisible; i++)
+        {
+            if (users[i])
+            {
+                display.setCursor(4, 12 + (displayed * 10));
+                display.print(users[i]);
+                displayed++;
+            }
+        }
+        
+        // Scroll indicators
+        if (userCount > maxVisible)
+        {
+            display.setCursor(120, 12);
+            if (scrollOffset > 0)
+            {
+                display.print("^");
+            }
+            
+            display.setCursor(120, 22);
+            if (scrollOffset + maxVisible < userCount)
+            {
+                display.print("v");
+            }
+        }
     }
 }
 

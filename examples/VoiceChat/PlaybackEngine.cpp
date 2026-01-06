@@ -7,9 +7,10 @@
 PlaybackEngine::PlaybackEngine()
     : state(PLAYBACK_IDLE), currentChannel(0),
       fileList(nullptr), fileCount(0), currentFileIndex(0),
-      fileStartTime(0), totalPackets(0), packetsPlayed(0),
+      playbackStartTime(0), totalPackets(0), packetsPlayed(0),
       fileHeaderRead(false), outputBufferPos(0), outputBufferCount(0)
 {
+    currentSender = "";
 }
 
 bool PlaybackEngine::begin()
@@ -41,7 +42,7 @@ bool PlaybackEngine::loadChannelQueue(uint8_t channel)
     cleanupFileList();
     currentChannel = channel;
 
-    // Build path: /RX/CH1/, /RX/CH2/, etc.
+    // Build path: /RX/CH1/, /RX/CH2/, etc. (1-indexed in filesystem)
     String dirPath = String(RX_DIR_PREFIX) + String(channel + 1);
 
     File dir = SD.open(dirPath.c_str());
@@ -121,9 +122,10 @@ bool PlaybackEngine::startPlayback(AudioPlayQueue* playQueue)
     }
 
     state = PLAYBACK_PLAYING;
-    fileStartTime = millis();
+    playbackStartTime = millis();
 
-    DEBUG_PRINTF("Starting playback: %s\n", getCurrentFileName().c_str());
+    DEBUG_PRINTF("Starting playback: %s (from %s)\n", 
+                 getCurrentFileName().c_str(), currentSender.c_str());
     return true;
 }
 
@@ -148,6 +150,9 @@ bool PlaybackEngine::openNextFile()
         return false;
     }
 
+    DEBUG_PRINTF("Opened file: %s (size=%lu bytes)\n", 
+                 fileList[currentFileIndex].c_str(), currentFile.size());
+
     // Read and validate header
     uint8_t header[6];
     if (currentFile.read(header, 6) != 6)
@@ -156,6 +161,9 @@ bool PlaybackEngine::openNextFile()
         currentFile.close();
         return false;
     }
+
+    DEBUG_PRINTF("Header: %02X %02X %02X %02X %02X %02X\n",
+                 header[0], header[1], header[2], header[3], header[4], header[5]);
 
     if (header[0] != 'O' || header[1] != 'P' || header[2] != 'U' || header[3] != 'S')
     {
@@ -172,10 +180,50 @@ bool PlaybackEngine::openNextFile()
     // Extract sender from filename
     currentSender = extractSender(fileList[currentFileIndex]);
 
-    // Estimate total packets from file size
-    // Header = 6 bytes, each packet ~40 bytes average + 2 byte size
-    uint32_t dataSize = currentFile.size() - 6;
-    totalPackets = dataSize / 42;  // Rough estimate
+    // Count actual packets in file for accurate duration
+    uint32_t filePos = currentFile.position();  // Save position after header (should be 6)
+    totalPackets = 0;
+    
+    DEBUG_PRINTF("Counting packets from position %lu...\n", filePos);
+    
+    while (currentFile.available())
+    {
+        uint16_t packetSize;
+        if (currentFile.read((uint8_t*)&packetSize, 2) != 2)
+        {
+            DEBUG_PRINTLN("  Failed to read packet size");
+            break;
+        }
+        
+        if (packetSize == 0 || packetSize > OPUS_MAX_PACKET_SIZE)
+        {
+            DEBUG_PRINTF("  Invalid packet size: %u\n", packetSize);
+            break;
+        }
+        
+        // Skip packet data
+        if (!currentFile.seek(currentFile.position() + packetSize))
+        {
+            DEBUG_PRINTLN("  Seek failed");
+            break;
+        }
+        
+        totalPackets++;
+        
+        if (totalPackets <= 3)
+        {
+            DEBUG_PRINTF("  Packet %lu: size=%u\n", totalPackets, packetSize);
+        }
+    }
+    
+    // Return to start of data
+    currentFile.seek(filePos);
+
+    DEBUG_PRINTF("File info:\n");
+    DEBUG_PRINTF("  Sender: %s\n", currentSender.c_str());
+    DEBUG_PRINTF("  Total packets: %lu\n", totalPackets);
+    DEBUG_PRINTF("  Duration: %lu ms\n", totalPackets * OPUS_FRAME_MS);
+    DEBUG_PRINTF("  Back to position: %lu\n", currentFile.position());
 
     return true;
 }
@@ -183,9 +231,14 @@ bool PlaybackEngine::openNextFile()
 String PlaybackEngine::extractSender(const String& filename)
 {
     // Filename format: /RX/CHx/MSG_00001_from_Alice.opus
-    // or just: /RX/CHx/MSG_00001.opus
+    // or just: /RX/CHx/MSG_00001.opus (no sender)
+    
+    DEBUG_PRINTF("Extracting sender from: %s\n", filename.c_str());
+    
     int lastSlash = filename.lastIndexOf('/');
     String name = (lastSlash >= 0) ? filename.substring(lastSlash + 1) : filename;
+
+    DEBUG_PRINTF("  Filename only: %s\n", name.c_str());
 
     int fromPos = name.indexOf("_from_");
     if (fromPos > 0)
@@ -193,10 +246,13 @@ String PlaybackEngine::extractSender(const String& filename)
         int dotPos = name.lastIndexOf('.');
         if (dotPos > fromPos)
         {
-            return name.substring(fromPos + 6, dotPos);
+            String sender = name.substring(fromPos + 6, dotPos);
+            DEBUG_PRINTF("  Extracted sender: %s\n", sender.c_str());
+            return sender;
         }
     }
 
+    DEBUG_PRINTLN("  No sender found, using Unknown");
     return "Unknown";
 }
 
@@ -231,6 +287,7 @@ bool PlaybackEngine::resumePlayback(AudioPlayQueue* playQueue)
     if (state == PLAYBACK_PAUSED)
     {
         state = PLAYBACK_PLAYING;
+        playbackStartTime = millis() - getPlaybackPosition();  // Adjust start time
         DEBUG_PRINTLN("Playback resumed");
         return true;
     }
@@ -250,6 +307,7 @@ bool PlaybackEngine::skipToNext()
     if (currentFileIndex >= fileCount)
     {
         // No more files
+        DEBUG_PRINTLN("No more files in queue");
         stopPlayback();
         return false;
     }
@@ -257,11 +315,14 @@ bool PlaybackEngine::skipToNext()
     // Open next file
     if (!openNextFile())
     {
+        DEBUG_PRINTLN("Failed to open next file");
         stopPlayback();
         return false;
     }
 
-    fileStartTime = millis();
+    playbackStartTime = millis();
+    DEBUG_PRINTF("Now playing: %s (from %s)\n", 
+                 getCurrentFileName().c_str(), currentSender.c_str());
     return true;
 }
 
@@ -286,9 +347,12 @@ bool PlaybackEngine::processPlayback(AudioPlayQueue* playQueue)
         return false;
     }
 
-    // Feed audio to the play queue
-    while (playQueue->available())
+    // Feed audio to the play queue when it's ready for more data
+    int loopCount = 0;
+    while (playQueue->available() && loopCount < 10)  // Limit iterations to prevent lockup
     {
+        loopCount++;
+        
         // If we have buffered samples, send them
         if (outputBufferPos < outputBufferCount)
         {
@@ -312,16 +376,22 @@ bool PlaybackEngine::processPlayback(AudioPlayQueue* playQueue)
         // Need more samples - decode next packet
         if (!decodeAndBuffer())
         {
-            // End of file or error
+            // End of file - try to move to next message
+            DEBUG_PRINTLN("File complete, checking for next message");
+            
             if (!skipToNext())
             {
                 // No more messages
-                return false;
+                DEBUG_PRINTLN("No more messages in queue");
+                return false;  // Signal that playback is done
             }
+            
+            // Successfully moved to next file, continue playback
+            continue;
         }
     }
 
-    return true;
+    return true;  // Still playing
 }
 
 bool PlaybackEngine::decodeAndBuffer()
@@ -331,10 +401,12 @@ bool PlaybackEngine::decodeAndBuffer()
 
     if (!readPacket(packet, &packetSize))
     {
+        DEBUG_PRINTF("readPacket failed, packetsPlayed=%lu, totalPackets=%lu\n", 
+                     packetsPlayed, totalPackets);
         return false;  // End of file or error
     }
 
-    // Decode packet to 16kHz, then upsample to 44.1kHz
+    // Decode packet - output is upsampled to 44.1kHz
     int samples = codec.decode(packet, packetSize, outputBuffer, RESAMPLE_OUTPUT_SAMPLES);
 
     if (samples <= 0)
@@ -346,6 +418,13 @@ bool PlaybackEngine::decodeAndBuffer()
     outputBufferCount = samples;
     outputBufferPos = 0;
     packetsPlayed++;
+
+    // Check if we've reached the end
+    if (packetsPlayed >= totalPackets)
+    {
+        DEBUG_PRINTF("Reached end: packetsPlayed=%lu, totalPackets=%lu\n", 
+                     packetsPlayed, totalPackets);
+    }
 
     return true;
 }
@@ -395,8 +474,20 @@ String PlaybackEngine::getCurrentFileName() const
 
 uint32_t PlaybackEngine::getPlaybackPosition() const
 {
-    // Each packet = 20ms of audio
-    return packetsPlayed * OPUS_FRAME_MS;
+    if (state == PLAYBACK_PLAYING)
+    {
+        // Calculate position based on packets played, not wall clock time
+        // This gives accurate position even if processing is slow
+        uint32_t position = packetsPlayed * OPUS_FRAME_MS;
+        return position;
+    }
+    else if (state == PLAYBACK_PAUSED)
+    {
+        // Use packet count when paused
+        return packetsPlayed * OPUS_FRAME_MS;
+    }
+    
+    return 0;
 }
 
 uint32_t PlaybackEngine::getFileDuration() const

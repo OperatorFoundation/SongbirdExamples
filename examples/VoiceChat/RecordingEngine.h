@@ -35,7 +35,7 @@ public:
     String getCurrentFileName() const { return currentFileName; }
     uint32_t getNextSequenceNumber() { return nextSequenceNumber; }
 
-    // Status
+    // Status - returns values based on recording state
     uint32_t getRecordingDuration() const;  // In milliseconds
     uint32_t getRecordingSize() const;      // In bytes (compressed)
     uint32_t getPacketCount() const { return packetCount; }

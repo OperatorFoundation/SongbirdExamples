@@ -1,5 +1,5 @@
 /*
- * Config.h - Configuration and constants for Songbird Field Recorder
+ * Config.h - Configuration and constants for Songbird VoiceChat
  *
  * Pin definitions, audio configuration, timing constants, and shared structures
  */
@@ -11,17 +11,17 @@
 
 // Version info
 #define FIRMWARE_VERSION "1.0.0"
-#define DEVICE_NAME "Songbird Field Recorder"
+#define DEVICE_NAME "Songbird VoiceChat"
 
 // ============================================================================
 // Pin Definitions
 // ============================================================================
 
 // Buttons
-#define BTN_UP_PIN       3     // Start/Stop recording
-#define BTN_DOWN_PIN     29    // Play/Pause
-#define BTN_LEFT_PIN     28    // Previous file / Gain down / Volume down
-#define BTN_RIGHT_PIN    30    // Next file / Gain up / Volume up
+#define BTN_UP_PIN       3     // PTT (Push-to-Talk)
+#define BTN_DOWN_PIN     29    // Skip/Mute
+#define BTN_LEFT_PIN     28    // Previous channel / Show users
+#define BTN_RIGHT_PIN    30    // Next channel
 
 // SD Card
 #define SDCARD_CS_PIN    10
@@ -31,8 +31,9 @@
 #define SDCARD_SCK_PIN   13
 
 // LEDs
-#define LED_BLUE_PIN     35    // Recording indicator
+#define LED_BLUE_PIN     35    // Connection/Status indicator
 #define LED_PINK_PIN     31    // Audio level/clipping indicator
+#define COUNTDOWN_FLASH_MS     200      // LED flash rate during countdown
 
 // Display (128x32 OLED)
 #define OLED_ADDRESS     0x3C
@@ -54,12 +55,11 @@
 #define TEENSY_AUDIO_SAMPLE_RATE       44100
 #define AUDIO_BITS_PER_SAMPLE   16
 #define AUDIO_MEMORY_BLOCKS     120      // Memory for audio processing
-#define AUDIO_BLOCK_SAMPLES     128     // Teensy Audio block size
+#define AUDIO_BLOCK_SAMPLES     128      // Teensy Audio block size
 
 // Recording settings
-#define RECORDING_SAMPLE_RATE   44100   // Teensy Audio Library native rate
+#define RECORDING_SAMPLE_RATE   44100    // Teensy Audio Library native rate
 #define RECORDING_CHANNELS      1        // Mono for voice recording
-#define WAV_BUFFER_SIZE         4096     // Larger buffer for reliability
 
 // Audio levels
 #define DEFAULT_MIC_GAIN       10      // 0-63 for SGTL5000
@@ -72,15 +72,14 @@
 #define MONITOR_VOLUME         0.3      // Input monitoring level during recording
 
 // AGC (Automatic Gain Control) settings for SGTL5000
-#define AGC_MAX_GAIN           2        // 0=3dB, 1=6dB, 2=12dB max gain boost (How much the AGC can boost quiet signals)
-#define AGC_LVL_SELECT         1        // Target level (0-31, lower = louder) - (The output level AGC tries to maintain)
-#define AGC_HARD_LIMIT         0        // 0=disabled, 1=enabled (prevents clipping)
-#define AGC_THRESHOLD          -10      // dB below target to activate (-96 to 0) - (How far below target before AGC activates)
-#define AGC_ATTACK             0.5      // Attack time (seconds) - (How quickly AGC responds to loud signals)
-#define AGC_DECAY              0.5      // Decay time (seconds) - (How quickly AGC recovers after loud signals)
+#define AGC_MAX_GAIN           2        // 0=3dB, 1=6dB, 2=12dB max gain boost
+#define AGC_LVL_SELECT         1        // Target level (0-31, lower = louder)
+#define AGC_HARD_LIMIT         0        // 0=disabled, 1=enabled
+#define AGC_THRESHOLD          -10      // dB below target to activate
+#define AGC_ATTACK             0.5      // Attack time (seconds)
+#define AGC_DECAY              0.5      // Decay time (seconds)
 
 // Wind-cut filter (high-pass at 100Hz)
-// Consider 80Hz for less aggressive filtering after field testing
 #define WINDCUT_FREQUENCY      100      // Hz
 #define WINDCUT_Q              0.707    // Butterworth response
 
@@ -89,45 +88,42 @@
 #define CLIPPING_HOLD_MS       500      // How long to show clipping indicator
 
 // ============================================================================
+// Opus Codec Configuration
+// ============================================================================
+
+// Opus settings (defined in OpusCodec.h but documented here)
+// - Sample rate: 16kHz (wideband voice)
+// - Frame size: 20ms (320 samples at 16kHz)
+// - Bitrate: 16kbps (good voice quality)
+// - Application: VOIP
+// - Channels: Mono
+
+// Resampling (44.1kHz Teensy -> 16kHz Opus -> 44.1kHz Teensy)
+// Input: 882 samples at 44.1kHz (20ms) -> 320 samples at 16kHz
+// Output: 320 samples at 16kHz -> 882 samples at 44.1kHz
+#define RESAMPLE_INPUT_SAMPLES  882     // 20ms at 44.1kHz
+#define RESAMPLE_OUTPUT_SAMPLES 882     // 20ms at 44.1kHz (after upsample)
+
+// ============================================================================
 // Timing Constants
 // ============================================================================
 
 // Button handling
 #define BUTTON_DEBOUNCE_MS     50       // Debounce time for buttons
-#define LONG_PRESS_MS          1000     // Long press detection (stop recording)
-#define EXTRA_LONG_PRESS_MS    2000     // Extra long press (enable AGC)
+#define LONG_PRESS_MS          1000     // Long press detection
+#define EXTRA_LONG_PRESS_MS    2000     // Extra long press
 
 // Display updates
 #define DISPLAY_UPDATE_MS      100      // Update rate during recording/playback
 #define DISPLAY_IDLE_UPDATE_MS 500      // Update rate when idle
-#define HINT_DISPLAY_MS        5000     // How long to show AGC hint
-
-// Recording
-#define COUNTDOWN_SECONDS      3        // Pre-recording countdown
-#define COUNTDOWN_FLASH_MS     200      // LED flash rate during countdown
-
-// Auto-save
-#define AUTO_SAVE_INTERVAL_MS  5000     // Flush WAV data every 5 seconds
-
-// AGC hint timing (all in milliseconds)
-#define HINT_INTERVAL_1_MIN    60000    // First 5 minutes: every 1 minute
-#define HINT_INTERVAL_2_MIN    120000   // Next 55 minutes: every 2 minutes
-#define HINT_INTERVAL_10_MIN   600000   // After 1 hour: every 10 minutes
-#define HINT_PHASE1_DURATION   300000   // 5 minutes
-#define HINT_PHASE2_DURATION   3600000  // 60 minutes total
 
 // ============================================================================
 // File System
 // ============================================================================
 
-#define RECORDINGS_DIR         "/RECORDINGS"
-#define RECORDER_MAX_FILENAME_LEN    32
+#define RECORDER_MAX_FILENAME_LEN    48
 #define MAX_FILES_TO_SCAN     999       // Maximum recordings to index
 #define MAX_SEQUENCE_NUMBER   99999     // Maximum file sequence number
-
-// File naming: REC_NNNNN.WAV (simple sequential)
-#define FILE_PREFIX           "REC_"
-#define FILE_EXTENSION        ".WAV"
 
 // ============================================================================
 // System States
@@ -138,9 +134,8 @@ enum SystemState {
     STATE_RECORDING,     // PTT held, recording
     STATE_PLAYING,       // Playing received message
     STATE_SWITCHING,     // Channel switch animation
-    STATE_COUNTDOWN,     // Keep this for compatibility
-    STATE_PLAYBACK,      // Keep this for compatibility
-    STATE_ERROR,         // Keep this
+    STATE_USERS,         // Showing user list
+    STATE_ERROR,         // Error state
     STATE_DISCONNECTED   // No serial connection
 };
 
@@ -159,7 +154,7 @@ enum ErrorType {
 
 struct Settings {
     uint8_t version;           // Settings version for migration
-    uint8_t currentChannel;    // Voice channel 1-5
+    uint8_t currentChannel;    // Voice channel 0-4 (displayed as 1-5)
     uint8_t micGain;           // Current microphone gain (0-63)
     float playbackVolume;      // Playback volume (0.0-1.0)
     bool agcEnabled;           // Automatic Gain Control on/off
@@ -174,21 +169,11 @@ struct Settings {
 #define SETTINGS_VERSION       1
 
 // ============================================================================
-// Display Constants
-// ============================================================================
-
-// Display regions (for efficient updates)
-#define STATUS_LINE_Y          0
-#define FILE_LINE_Y           16
-#define METER_WIDTH           50
-#define METER_HEIGHT          8
-
-// ============================================================================
 // Debug Configuration
 // ============================================================================
 
 // Uncomment for serial debug output
-//#define DEBUG_MODE
+#define DEBUG_MODE
 
 #ifdef DEBUG_MODE
   #define DEBUG_PRINT(x)     Serial.print(x)
@@ -208,10 +193,6 @@ struct Settings {
 #define NUM_CHANNELS           5        // Total number of channels
 #define DEFAULT_CHANNEL        0        // Start on Channel 1 (0-indexed)
 
-// Channel switch beep
-#define BEEP_FREQUENCY         1000     // Hz
-#define BEEP_DURATION_MS       100      // Milliseconds
-
 // Serial communication
 #define SERIAL_BAUD_RATE       115200
 #define CONNECTION_TIMEOUT_MS  3000     // Consider disconnected after 3s of no data
@@ -223,27 +204,5 @@ struct Settings {
 #define RX_DIR_PREFIX         "/RX/CH"   // /RX/CH1/, /RX/CH2/, etc.
 #define TX_DIR                "/TX"      // Outgoing messages
 #define MAX_FILES_PER_CHANNEL 100        // Limit queue size per channel
-
-// ============================================================================
-// Opus Codec Configuration
-// ============================================================================
-
-#define OPUS_SAMPLE_RATE      16000     // 16kHz wideband voice
-#define OPUS_CHANNELS         1         // Mono
-#define OPUS_FRAME_MS         20        // 20ms frames (standard for voice)
-#define OPUS_BITRATE_DEFAULT  16000     // 16 kbps - good voice quality
-#define OPUS_BITRATE_MIN      8000      // 8 kbps - minimum for voice
-#define OPUS_BITRATE_MAX      32000     // 32 kbps - high quality
-#define OPUS_COMPLEXITY       5         // 0-10, balance quality/CPU
-#define OPUS_MAX_PACKET_SIZE  256       // Max encoded packet bytes
-
-// Calculated values
-#define OPUS_FRAME_SAMPLES    (OPUS_SAMPLE_RATE * OPUS_FRAME_MS / 1000)  // 320 samples
-
-// Resampling (44.1kHz <-> 16kHz)
-// Samples needed at 44.1kHz to produce one 16kHz frame:
-// 320 * (44100/16000) = 882 samples
-#define RESAMPLE_INPUT_SAMPLES  882
-#define RESAMPLE_OUTPUT_SAMPLES 882     // Output samples from one decoded frame
 
 #endif // CONFIG_H

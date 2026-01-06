@@ -1,14 +1,18 @@
 /*
  * VoiceChat.ino - Songbird VoiceChat
  *
- * Push-to-talk voice chat with Opus compression.
- * Records complete messages, then transfers as files.
+ * A push-to-talk voice chat application with Opus compression
+ *
+ * Button controls:
+ * - TOP (UP): Push-to-Talk (hold to record, release to send)
+ * - LEFT: Previous channel / Long press to show users
+ * - RIGHT: Next channel
+ * - CENTER (DOWN): Skip current message / Long press to mute
  */
 
 #include <Arduino.h>
 #include <Wire.h>
 #include <Audio.h>
-#include <SD.h>
 
 #include "Config.h"
 #include "AudioSystem.h"
@@ -16,9 +20,9 @@
 #include "UIController.h"
 #include "LEDControl.h"
 #include "StorageManager.h"
+#include "SerialProtocol.h"
 #include "RecordingEngine.h"
 #include "PlaybackEngine.h"
-#include "SerialProtocol.h"
 
 // =============================================================================
 // Global Objects
@@ -29,12 +33,13 @@ DisplayManager display;
 UIController ui;
 LEDControl leds;
 StorageManager storage;
+SerialProtocol protocol;
 RecordingEngine recorder;
 PlaybackEngine player;
-SerialProtocol protocol;
 
 // System state
 SystemState currentState = STATE_IDLE;
+SystemState previousState = STATE_IDLE;
 ErrorType currentError = ERROR_NONE;
 
 // Settings
@@ -42,9 +47,7 @@ Settings currentSettings;
 
 // Timing
 elapsedMillis displayUpdateTimer = 0;
-elapsedMillis recordingTimer = 0;
-elapsedMillis channelSwitchTimer = 0;
-elapsedMillis playbackTimer = 0;
+elapsedMillis playbackCheckTimer = 0;
 
 // State variables
 bool isConnected = false;
@@ -52,6 +55,9 @@ uint8_t queuedMessages[NUM_CHANNELS] = {0};
 bool wasPlayingBeforePTT = false;
 String currentSender = "";
 uint32_t currentMessageDuration = 0;
+
+// User list display
+uint8_t userListScrollOffset = 0;
 
 // =============================================================================
 // Forward Declarations
@@ -61,16 +67,21 @@ void processIdleState();
 void processRecordingState();
 void processPlayingState();
 void processSwitchingState();
+void processUsersState();
+void processDisconnectedState();
 
 void startRecording();
 void stopRecording();
 void startPlayback();
 void stopPlayback();
 void switchChannel(int8_t direction);
-void playChannelSwitchBeep();
+void showUserList();
+void hideUserList();
+
 void updateDisplay();
 void handleButtonEvents();
-void processSerial();
+void processProtocol();
+void updateQueueCounts();
 
 // =============================================================================
 // Setup
@@ -78,76 +89,65 @@ void processSerial();
 
 void setup()
 {
-    // Initialize serial for protocol (not debug)
     Serial.begin(SERIAL_BAUD_RATE);
-    delay(100);
 
-    // Initialize LEDs
-    leds.begin();
-
-    // Initialize I2C for display - set pins before begin
+    // Initialize I2C for display
+    Wire1.begin();
     Wire1.setSDA(OLED_SDA_PIN);
     Wire1.setSCL(OLED_SCL_PIN);
-    Wire1.begin();
-    delay(50);
 
     // Initialize display
-    if (display.begin())
+    if (!display.begin())
     {
-        display.showStartupScreen();
-        display.update();
+        // Continue anyway
     }
+
+    display.showStartupScreen();
+    display.update();
     delay(1000);
 
-    // Initialize UI
+    // Initialize UI and LEDs
     ui.begin();
+    leds.begin();
 
-    // Initialize SD card
-    SD.begin(SDCARD_CS_PIN);
-
-    // Create directories
-    SD.mkdir("/RX");
-    SD.mkdir(TX_DIR);
-    for (uint8_t i = 0; i < NUM_CHANNELS; i++)
+    // Initialize storage and load settings
+    storage.begin();
+    if (!storage.loadSettings(currentSettings))
     {
-        char dirPath[24];
-        snprintf(dirPath, sizeof(dirPath), "%s%d", RX_DIR_PREFIX, i + 1);
-        SD.mkdir(dirPath);
+        currentSettings = storage.getDefaultSettings();
+    }
+    currentSettings.currentChannel = DEFAULT_CHANNEL;
+
+    // Initialize audio system
+    if (!audioSystem.begin())
+    {
+        currentState = STATE_ERROR;
+        currentError = ERROR_NO_SD_CARD;
+    }
+    else
+    {
+        audioSystem.setMicGain(currentSettings.micGain);
+        audioSystem.enableAutoGainControl(currentSettings.agcEnabled);
+        audioSystem.setPlaybackVolume(currentSettings.playbackVolume);
     }
 
-    // Initialize settings
-    currentSettings.currentChannel = DEFAULT_CHANNEL;
-    currentSettings.micGain = DEFAULT_MIC_GAIN;
-    currentSettings.playbackVolume = DEFAULT_PLAYBACK_VOLUME;
-    currentSettings.agcEnabled = true;
-    currentSettings.muted = false;
-
-    // Initialize audio
-    audioSystem.begin();
-    audioSystem.setMicGain(currentSettings.micGain);
-    audioSystem.enableAutoGainControl(currentSettings.agcEnabled);
-    audioSystem.setPlaybackVolume(currentSettings.playbackVolume);
-
-    // Initialize storage
-    storage.begin();
-
     // Initialize recording engine
-    recorder.begin();
+    if (!recorder.begin())
+    {
+        // Non-fatal, but recording won't work
+    }
 
     // Initialize playback engine
-    player.begin();
+    if (!player.begin())
+    {
+        // Non-fatal, but playback won't work
+    }
 
     // Initialize serial protocol
     protocol.begin(&Serial);
 
-    // Don't auto-load queue - it's finding phantom messages
-    // player.loadChannelQueue(currentSettings.currentChannel);
-    // queuedMessages[currentSettings.currentChannel] = player.getQueuedCount();
-
-    currentState = STATE_IDLE;
-    leds.setBlueLED(false);
-    
-    updateDisplay();
+    // Set initial LED state
+    leds.setBlueLED(false);  // Will turn on when connected
 }
 
 // =============================================================================
@@ -159,25 +159,80 @@ void loop()
     ui.update();
     leds.update();
 
-    // Process serial communication
-    processSerial();
+    // Process serial protocol (receives files, join/part messages, pings)
+    processProtocol();
 
     // Update connection status
+    bool wasConnected = isConnected;
     isConnected = protocol.isConnected();
-    leds.setBlueLED(isConnected);
+    
+    if (isConnected && !wasConnected)
+    {
+        protocol.sendLog("Connected");
+        leds.setBlueLED(true);
+        if (currentState == STATE_DISCONNECTED)
+        {
+            currentState = STATE_IDLE;
+        }
+    }
+    else if (!isConnected && wasConnected)
+    {
+        protocol.sendLog("Disconnected");
+        leds.setBlueLED(false);
+        if (currentState != STATE_RECORDING)
+        {
+            currentState = STATE_DISCONNECTED;
+        }
+    }
 
+    // Handle button events
     handleButtonEvents();
 
+    // State processing
     switch (currentState)
     {
-        case STATE_IDLE:        processIdleState(); break;
-        case STATE_RECORDING:   processRecordingState(); break;
-        case STATE_PLAYING:     processPlayingState(); break;
-        case STATE_SWITCHING:   processSwitchingState(); break;
+        case STATE_IDLE: processIdleState(); break;
+        case STATE_RECORDING: processRecordingState(); break;
+        case STATE_PLAYING: processPlayingState(); break;
+        case STATE_SWITCHING: processSwitchingState(); break;
+        case STATE_USERS: processUsersState(); break;
+        case STATE_DISCONNECTED: processDisconnectedState(); break;
+        case STATE_ERROR: break;
         default: break;
     }
 
+    // Update display
     updateDisplay();
+}
+
+// =============================================================================
+// Protocol Processing
+// =============================================================================
+
+void processProtocol()
+{
+    if (protocol.processIncoming())
+    {
+        // A complete file was received
+        uint8_t channel = protocol.getReceivedChannel();
+        
+        protocol.sendLogf("File received on ch %d", channel);
+        
+        // Update queue count for this channel
+        if (channel >= 1 && channel <= NUM_CHANNELS)
+        {
+            queuedMessages[channel - 1]++;
+        }
+        
+        protocol.clearReceivedFile();
+        
+        // If idle and this is our channel, start playback
+        if (currentState == STATE_IDLE && 
+            channel == currentSettings.currentChannel + 1)
+        {
+            startPlayback();
+        }
+    }
 }
 
 // =============================================================================
@@ -186,22 +241,32 @@ void loop()
 
 void processIdleState()
 {
-    // Auto-play disabled for now until phantom message issue is fixed
-    // if (!currentSettings.muted && player.hasMessages())
-    // {
-    //     startPlayback();
-    // }
+    // Check if there are queued messages on current channel
+    if (playbackCheckTimer > 500)
+    {
+        playbackCheckTimer = 0;
+        
+        if (queuedMessages[currentSettings.currentChannel] > 0 && !currentSettings.muted)
+        {
+            startPlayback();
+        }
+    }
 }
 
 void processRecordingState()
 {
-    // Process audio from queue to encoder
+    // Process audio from record queue
     AudioRecordQueue* queue = audioSystem.getRecordQueue();
-    recorder.processRecording(queue);
-
-    // Update audio level display
+    
+    if (queue->available() > 0)
+    {
+        recorder.processRecording(queue);
+    }
+    
+    // Update LED with audio level
     float level = audioSystem.getPeakLevel();
     leds.setAudioLevel(level);
+    
     if (audioSystem.isClipping())
     {
         leds.setClipping(true);
@@ -210,24 +275,28 @@ void processRecordingState()
 
 void processPlayingState()
 {
-    AudioPlayQueue* playQueue = audioSystem.getPlayQueue();
-
-    if (!player.processPlayback(playQueue))
+    // Feed audio to play queue
+    if (!player.processPlayback(audioSystem.getPlayQueue()))
     {
+        // Playback finished or no more messages
         stopPlayback();
-        return;
     }
-
-    currentMessageDuration = player.getFileDuration();
-    currentSender = player.getSenderName();
 }
 
 void processSwitchingState()
 {
-    if (channelSwitchTimer >= CHANNEL_SWITCH_DISPLAY_MS)
-    {
-        currentState = STATE_IDLE;
-    }
+    // Channel switch animation is handled by timer in switchChannel()
+    // This state just displays the channel switch screen
+}
+
+void processUsersState()
+{
+    // User list display - handled by button events
+}
+
+void processDisconnectedState()
+{
+    // Just wait for connection
 }
 
 // =============================================================================
@@ -242,39 +311,79 @@ void startRecording()
         player.pausePlayback();
     }
 
+    protocol.sendLog("Starting recording");
+    
+    // Start the audio record queue
+    AudioRecordQueue* queue = audioSystem.getRecordQueue();
+    if (!queue)
+    {
+        protocol.sendLog("ERROR: Record queue is null");
+        return;
+    }
+    
+    queue->begin();
+    
+    // Start recording to file (channel is 0-indexed here, will be converted)
     if (!recorder.startRecording(currentSettings.currentChannel))
     {
+        protocol.sendLog("Failed to start recording");
+        queue->end();
         return;
     }
 
-    audioSystem.getRecordQueue()->begin();
-
+    protocol.sendLog("Recording started");
     currentState = STATE_RECORDING;
-    recordingTimer = 0;
 
     audioSystem.enableInputMonitoring(true);
     leds.setRecording(true);
-    leds.setBlueLED(false);
 }
 
 void stopRecording()
 {
+    uint32_t duration = recorder.getRecordingDuration();
+    protocol.sendLogf("Stopping recording: %lu ms", duration);
+
+    // Stop the audio record queue
     audioSystem.getRecordQueue()->end();
-
-    recorder.stopRecording();
-
-    // Send the recorded file over serial
-    String filepath = recorder.getCurrentFileName();
-    if (filepath.length() > 0)
+    
+    // Stop recording (closes file, returns filename)
+    if (!recorder.stopRecording())
     {
-        protocol.sendFile(filepath.c_str(), currentSettings.currentChannel);
-        SD.remove(filepath.c_str());
+        protocol.sendLog("Failed to stop recording");
+        audioSystem.enableInputMonitoring(false);
+        leds.setRecording(false);
+        currentState = STATE_IDLE;
+        return;
     }
 
     audioSystem.enableInputMonitoring(false);
     leds.setRecording(false);
-    leds.setBlueLED(isConnected);
 
+    // Send the recorded file (channel is 1-indexed for protocol)
+    String filename = recorder.getCurrentFileName();
+    if (filename.length() > 0)
+    {
+        protocol.sendLogf("Sending: %s", filename.c_str());
+        
+        uint8_t channel = currentSettings.currentChannel + 1;  // Convert to 1-indexed
+        if (protocol.sendFile(filename.c_str(), channel))
+        {
+            protocol.sendLog("File sent successfully");
+            // Delete the file after sending
+            SD.remove(filename.c_str());
+            protocol.sendLogf("Deleted: %s", filename.c_str());
+        }
+        else
+        {
+            protocol.sendLog("Failed to send file");
+        }
+    }
+    else
+    {
+        protocol.sendLog("No filename to send");
+    }
+
+    // Return to previous state
     if (wasPlayingBeforePTT)
     {
         wasPlayingBeforePTT = false;
@@ -289,79 +398,88 @@ void stopRecording()
 
 void startPlayback()
 {
-    AudioPlayQueue* playQueue = audioSystem.getPlayQueue();
-
-    if (!player.startPlayback(playQueue))
+    protocol.sendLog("Starting playback");
+    
+    // Load queue for current channel
+    player.loadChannelQueue(currentSettings.currentChannel);
+    
+    if (!player.hasMessages())
     {
+        protocol.sendLog("No messages to play");
+        queuedMessages[currentSettings.currentChannel] = 0;
         return;
     }
 
-    currentState = STATE_PLAYING;
-    playbackTimer = 0;
+    if (!player.startPlayback(audioSystem.getPlayQueue()))
+    {
+        protocol.sendLog("Failed to start playback");
+        return;
+    }
+
+    // Get sender info from the opened file
     currentSender = player.getSenderName();
     currentMessageDuration = player.getFileDuration();
-
+    currentState = STATE_PLAYING;
+    
+    protocol.sendLogf("Playing message from: %s", currentSender.c_str());
+    
     audioSystem.enableHeadphoneAmp(true);
 }
 
 void stopPlayback()
 {
+    protocol.sendLog("Stopping playback");
+    
     player.stopPlayback();
     audioSystem.enableHeadphoneAmp(false);
+    
+    // Update queue count
+    updateQueueCounts();
+    
     currentState = STATE_IDLE;
-
-    queuedMessages[currentSettings.currentChannel] = player.getQueuedCount();
 }
 
 void switchChannel(int8_t direction)
 {
     if (currentState == STATE_PLAYING)
     {
-        player.stopPlayback();
+        stopPlayback();
     }
 
     int8_t newChannel = currentSettings.currentChannel + direction;
     if (newChannel < 0) newChannel = NUM_CHANNELS - 1;
-    else if (newChannel >= NUM_CHANNELS) newChannel = 0;
+    if (newChannel >= NUM_CHANNELS) newChannel = 0;
 
     currentSettings.currentChannel = newChannel;
+    
+    protocol.sendLogf("Switched to channel %d", newChannel + 1);
 
+    currentState = STATE_SWITCHING;
+    
+    // Use a simple delay for the channel switch animation
+    // This will block briefly but keeps the code simple
+    delay(CHANNEL_SWITCH_DISPLAY_MS);
+    
+    currentState = STATE_IDLE;
+}
+
+void showUserList()
+{
+    previousState = currentState;
+    currentState = STATE_USERS;
+    userListScrollOffset = 0;
+}
+
+void hideUserList()
+{
+    currentState = previousState;
+}
+
+void updateQueueCounts()
+{
+    // Reload queue to get accurate count
     player.loadChannelQueue(currentSettings.currentChannel);
     queuedMessages[currentSettings.currentChannel] = player.getQueuedCount();
-
-    playChannelSwitchBeep();
-    currentState = STATE_SWITCHING;
-    channelSwitchTimer = 0;
-}
-
-void playChannelSwitchBeep()
-{
-    leds.setBlueLED(false);
-    delay(BEEP_DURATION_MS);
-    leds.setBlueLED(isConnected);
-}
-
-// =============================================================================
-// Serial Communication
-// =============================================================================
-
-void processSerial()
-{
-    if (protocol.processIncoming())
-    {
-        if (protocol.hasReceivedFile())
-        {
-            uint8_t rxChannel = protocol.getReceivedChannel();
-            if (rxChannel == currentSettings.currentChannel)
-            {
-                player.loadChannelQueue(currentSettings.currentChannel);
-                queuedMessages[currentSettings.currentChannel] = player.getQueuedCount();
-            }
-            
-            leds.setPinkLED(128);
-            protocol.clearReceivedFile();
-        }
-    }
 }
 
 // =============================================================================
@@ -370,35 +488,63 @@ void processSerial()
 
 void updateDisplay()
 {
-    uint32_t interval = (currentState == STATE_IDLE) ?
-                        DISPLAY_IDLE_UPDATE_MS : DISPLAY_UPDATE_MS;
-
+    uint32_t interval = (currentState == STATE_IDLE) ? DISPLAY_IDLE_UPDATE_MS : DISPLAY_UPDATE_MS;
     if (displayUpdateTimer < interval) return;
     displayUpdateTimer = 0;
 
     switch (currentState)
     {
         case STATE_IDLE:
-            display.showIdleScreen(currentSettings.currentChannel, isConnected,
-                                   queuedMessages[currentSettings.currentChannel]);
+            display.showIdleScreen(
+                currentSettings.currentChannel,
+                isConnected,
+                queuedMessages[currentSettings.currentChannel]
+            );
             break;
+
         case STATE_RECORDING:
-            display.showRecordingScreen(currentSettings.currentChannel,
-                                        recordingTimer / 1000);
+            display.showRecordingScreen(
+                currentSettings.currentChannel,
+                recorder.getRecordingDuration() / 1000  // Convert ms to seconds
+            );
             break;
+
         case STATE_PLAYING:
-            display.showPlayingScreen(currentSettings.currentChannel,
-                                      player.getPlaybackPosition() / 1000,
-                                      player.getFileDuration() / 1000,
-                                      player.getSenderName());
+            display.showPlayingScreen(
+                currentSettings.currentChannel,
+                player.getPlaybackPosition() / 1000,
+                player.getFileDuration() / 1000,
+                currentSender
+            );
             break;
+
         case STATE_SWITCHING:
-            display.showChannelSwitch(currentSettings.currentChannel,
-                                      queuedMessages[currentSettings.currentChannel]);
+            display.showChannelSwitch(
+                currentSettings.currentChannel,
+                queuedMessages[currentSettings.currentChannel]
+            );
             break;
+
+        case STATE_USERS:
+            {
+                uint8_t count = protocol.getUserCount();
+                const char* users[MAX_USERS];
+                for (uint8_t i = 0; i < count && i < MAX_USERS; i++)
+                {
+                    users[i] = protocol.getUser(i);
+                }
+                display.showUserListScreen(users, count, userListScrollOffset);
+            }
+            break;
+
+        case STATE_DISCONNECTED:
+            display.showDisconnected();
+            break;
+
         case STATE_ERROR:
             display.showErrorScreen(currentError);
             break;
+
         default:
             break;
     }
@@ -413,9 +559,9 @@ void updateDisplay()
 void handleButtonEvents()
 {
     // PTT (TOP/UP button)
-    if (ui.isPressed(BTN_UP))
+    if (ui.wasJustPressed(BTN_UP))
     {
-        if (currentState != STATE_RECORDING && currentState != STATE_ERROR)
+        if (currentState != STATE_RECORDING && currentState != STATE_USERS)
         {
             startRecording();
         }
@@ -428,10 +574,33 @@ void handleButtonEvents()
         }
     }
 
-    // Channel switching (not while recording)
-    if (currentState != STATE_RECORDING && currentState != STATE_ERROR)
+    // User list and channel switching
+    if (currentState == STATE_USERS)
     {
-        if (ui.wasJustPressed(BTN_LEFT))
+        if (ui.wasJustReleased(BTN_LEFT))
+        {
+            hideUserList();
+        }
+        else if (ui.wasJustPressed(BTN_UP))
+        {
+            if (userListScrollOffset > 0) userListScrollOffset--;
+        }
+        else if (ui.wasJustPressed(BTN_DOWN))
+        {
+            uint8_t maxVisible = 2;
+            if (userListScrollOffset + maxVisible < protocol.getUserCount())
+            {
+                userListScrollOffset++;
+            }
+        }
+    }
+    else if (currentState != STATE_RECORDING)
+    {
+        if (ui.isLongPressed(BTN_LEFT))
+        {
+            showUserList();
+        }
+        else if (ui.wasJustPressed(BTN_LEFT))
         {
             switchChannel(-1);
         }
@@ -441,28 +610,31 @@ void handleButtonEvents()
         }
     }
 
-    // Skip/Mute (CENTER/DOWN button)
-    if (ui.wasJustPressed(BTN_DOWN))
+    // Skip/Mute (DOWN button)
+    if (currentState != STATE_USERS && currentState != STATE_RECORDING)
     {
-        if (currentState == STATE_PLAYING)
+        if (ui.wasJustPressed(BTN_DOWN) && currentState == STATE_PLAYING)
         {
-            player.skipToNext();
-            queuedMessages[currentSettings.currentChannel] = player.getQueuedCount();
-
-            if (!player.isPlaying())
+            // Skip to next message
+            protocol.sendLog("Skipping message");
+            
+            if (!player.skipToNext())
             {
-                currentState = STATE_IDLE;
+                // No more messages
+                stopPlayback();
+            }
+            else
+            {
+                // Update sender info for new message
+                currentSender = player.getSenderName();
+                currentMessageDuration = player.getFileDuration();
+                protocol.sendLogf("Now playing from: %s", currentSender.c_str());
             }
         }
-    }
-    else if (ui.isLongPressed(BTN_DOWN))
-    {
-        currentSettings.muted = !currentSettings.muted;
-
-        if (currentSettings.muted && currentState == STATE_PLAYING)
+        else if (ui.isLongPressed(BTN_DOWN))
         {
-            player.stopPlayback();
-            currentState = STATE_IDLE;
+            currentSettings.muted = !currentSettings.muted;
+            protocol.sendLogf("Mute: %s", currentSettings.muted ? "ON" : "OFF");
         }
     }
 }

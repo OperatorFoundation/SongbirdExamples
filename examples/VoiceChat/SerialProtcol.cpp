@@ -3,18 +3,26 @@
  *
  * TX: Simple header without username
  * RX: Header includes username from bridge
+ * Control messages: Join/Part notifications
  */
 
 #include "SerialProtocol.h"
+#include <stdarg.h>
 
 SerialProtocol::SerialProtocol()
     : serial(nullptr), rxState(RX_WAIT_SYNC1), rxFileLength(0),
       rxBytesReceived(0), rxChannel(0), rxLengthPos(0),
-      rxUsernameLen(0), rxUsernamePos(0),
-      rxFileReady(false), rxSequence(0), lastActivityTime(0)
+      rxMsgType(0), rxUsernameLen(0), rxUsernamePos(0),
+      rxFileReady(false), rxSequence(0), lastActivityTime(0),
+      userCount(0), userListChanged(false)
 {
     rxUsername[0] = '\0';
     rxFilePath[0] = '\0';
+    
+    // Clear user list
+    for (uint8_t i = 0; i < MAX_USERS; i++) {
+        users[i][0] = '\0';
+    }
 }
 
 bool SerialProtocol::begin(Stream* serialPort)
@@ -23,6 +31,11 @@ bool SerialProtocol::begin(Stream* serialPort)
     serial = serialPort;
     resetRxState();
     lastActivityTime = millis();
+    
+    // Give a moment for serial to stabilize
+    delay(100);
+    
+    sendLog("SerialProtocol initialized");
     return true;
 }
 
@@ -32,6 +45,7 @@ void SerialProtocol::resetRxState()
     rxFileLength = 0;
     rxBytesReceived = 0;
     rxLengthPos = 0;
+    rxMsgType = 0;
     rxUsernameLen = 0;
     rxUsernamePos = 0;
     rxUsername[0] = '\0';
@@ -45,17 +59,64 @@ bool SerialProtocol::isConnected() const
     return (millis() - lastActivityTime) < CONNECTION_TIMEOUT_MS;
 }
 
+const char* SerialProtocol::getUser(uint8_t index) const
+{
+    if (index >= userCount) return nullptr;
+    return users[index];
+}
+
+int SerialProtocol::findUser(const char* username) const
+{
+    for (uint8_t i = 0; i < userCount; i++) {
+        if (strcmp(users[i], username) == 0) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void SerialProtocol::addUser(const char* username)
+{
+    if (userCount >= MAX_USERS) return;
+    if (findUser(username) >= 0) return; // Already exists
+    
+    strncpy(users[userCount], username, MAX_USERNAME_LEN);
+    users[userCount][MAX_USERNAME_LEN] = '\0';
+    userCount++;
+    userListChanged = true;
+    
+    sendLogf("User joined: %s (total: %d)", username, userCount);
+}
+
+void SerialProtocol::removeUser(const char* username)
+{
+    int idx = findUser(username);
+    if (idx < 0) return;
+    
+    // Shift remaining users down
+    for (uint8_t i = idx; i < userCount - 1; i++) {
+        strcpy(users[i], users[i + 1]);
+    }
+    userCount--;
+    users[userCount][0] = '\0';
+    userListChanged = true;
+    
+    sendLogf("User left: %s (total: %d)", username, userCount);
+}
+
 bool SerialProtocol::sendFile(const char* filepath, uint8_t channel)
 {
     if (!serial) return false;
 
     File file = SD.open(filepath, FILE_READ);
     if (!file) {
+        sendLogf("Failed to open file: %s", filepath);
         return false;
     }
 
     uint32_t fileSize = file.size();
     if (fileSize > MAX_FILE_SIZE) {
+        sendLogf("File too large: %lu", fileSize);
         file.close();
         return false;
     }
@@ -82,28 +143,64 @@ bool SerialProtocol::sendFile(const char* filepath, uint8_t channel)
     }
 
     file.close();
+    sendLogf("Sent file: %s (%lu bytes)", filepath, fileSize);
     return true;
+}
+
+void SerialProtocol::sendLog(const char* message)
+{
+    if (!serial) return;
+    
+    size_t len = strlen(message);
+    if (len > 255) len = 255;  // Cap at 255 bytes
+    
+    // Header: sync(2) + length(4) + channel(1=0xFE)
+    uint8_t header[TX_HEADER_SIZE];
+    header[0] = SYNC_BYTE_1;
+    header[1] = SYNC_BYTE_2;
+    header[2] = len & 0xFF;
+    header[3] = (len >> 8) & 0xFF;
+    header[4] = (len >> 16) & 0xFF;
+    header[5] = (len >> 24) & 0xFF;
+    header[6] = LOG_CHANNEL;
+    
+    serial->write(header, TX_HEADER_SIZE);
+    serial->write((const uint8_t*)message, len);
+}
+
+void SerialProtocol::sendLogf(const char* format, ...)
+{
+    char buffer[256];
+    va_list args;
+    va_start(args, format);
+    vsnprintf(buffer, sizeof(buffer), format, args);
+    va_end(args);
+    sendLog(buffer);
 }
 
 bool SerialProtocol::openRxFile()
 {
     // Generate filename with username if present
-    // Format: /RX/CHx/MSG_NNNNN_from_Username.opus
-    // Or:     /RX/CHx/MSG_NNNNN.opus (if no username)
+    // rxChannel from protocol is 1-indexed (1-5), matches directory names
     
     if (rxUsernameLen > 0)
     {
         snprintf(rxFilePath, sizeof(rxFilePath), "%s%d/MSG_%05lu_from_%s.opus",
-                 RX_DIR_PREFIX, rxChannel + 1, rxSequence, rxUsername);
+                 RX_DIR_PREFIX, rxChannel, rxSequence, rxUsername);
     }
     else
     {
         snprintf(rxFilePath, sizeof(rxFilePath), "%s%d/MSG_%05lu.opus",
-                 RX_DIR_PREFIX, rxChannel + 1, rxSequence);
+                 RX_DIR_PREFIX, rxChannel, rxSequence);
     }
+    
+    sendLogf("Creating RX file: %s", rxFilePath);
+    sendLogf("  Channel: %d", rxChannel);
+    sendLogf("  Username: %s", rxUsernameLen > 0 ? rxUsername : "(none)");
     
     rxFile = SD.open(rxFilePath, FILE_WRITE);
     if (!rxFile) {
+        sendLogf("Failed to create file: %s", rxFilePath);
         return false;
     }
     
@@ -145,7 +242,10 @@ bool SerialProtocol::processIncoming()
                                    (rxLengthBytes[2] << 16) |
                                    (rxLengthBytes[3] << 24);
                     
-                    if (rxFileLength == 0 || rxFileLength > MAX_FILE_SIZE) {
+                    sendLogf("RX length: %lu", rxFileLength);
+                    
+                    if (rxFileLength > MAX_FILE_SIZE) {
+                        sendLog("Length too large, resetting");
                         resetRxState();
                     } else {
                         rxState = RX_READ_CHANNEL;
@@ -154,8 +254,35 @@ bool SerialProtocol::processIncoming()
                 break;
 
             case RX_READ_CHANNEL:
-                rxChannel = byte & 0x0F;
-                rxState = RX_READ_USERNAME_LEN;
+                rxChannel = byte;
+                sendLogf("RX channel: 0x%02X", rxChannel);
+                
+                // Check if this is a control message
+                if (rxChannel == CONTROL_CHANNEL && rxFileLength == 0) {
+                    sendLog("Control message detected");
+                    rxState = RX_READ_MSG_TYPE;
+                } else if (rxFileLength == 0) {
+                    // Invalid: non-control with zero length
+                    sendLog("Invalid: zero length non-control");
+                    resetRxState();
+                } else {
+                    // Audio message - channel is 1-indexed (1-5)
+                    rxState = RX_READ_USERNAME_LEN;
+                }
+                break;
+
+            case RX_READ_MSG_TYPE:
+                rxMsgType = byte;
+                if (rxMsgType == MSG_TYPE_JOIN || rxMsgType == MSG_TYPE_PART) {
+                    rxState = RX_READ_USERNAME_LEN;
+                } else if (rxMsgType == MSG_TYPE_PING) {
+                    // Ping received - just reset state, lastActivityTime already updated
+                    resetRxState();
+                } else {
+                    // Unknown control message type
+                    sendLogf("Unknown msg type: 0x%02X", rxMsgType);
+                    resetRxState();
+                }
                 break;
 
             case RX_READ_USERNAME_LEN:
@@ -163,17 +290,26 @@ bool SerialProtocol::processIncoming()
                 rxUsernamePos = 0;
                 rxUsername[0] = '\0';
                 
+                sendLogf("RX username len: %d", rxUsernameLen);
+                
                 if (rxUsernameLen > MAX_USERNAME_LEN) {
                     rxUsernameLen = MAX_USERNAME_LEN;
                 }
                 
                 if (rxUsernameLen == 0) {
-                    // No username, open file and go to data
-                    rxBytesReceived = 0;
-                    if (!openRxFile()) {
+                    // No username
+                    if (rxChannel == CONTROL_CHANNEL) {
+                        // Control message with no username - invalid
+                        sendLog("Control msg with no username");
                         resetRxState();
                     } else {
-                        rxState = RX_READ_DATA;
+                        // Audio file with no username
+                        rxBytesReceived = 0;
+                        if (!openRxFile()) {
+                            resetRxState();
+                        } else {
+                            rxState = RX_READ_DATA;
+                        }
                     }
                 } else {
                     rxState = RX_READ_USERNAME;
@@ -185,10 +321,26 @@ bool SerialProtocol::processIncoming()
                 
                 if (rxUsernamePos >= rxUsernameLen) {
                     rxUsername[rxUsernameLen] = '\0';
-                    rxBytesReceived = 0;
+                    sendLogf("RX username: %s", rxUsername);
                     
-                    if (!openRxFile()) {
+                    // Handle control messages
+                    if (rxChannel == CONTROL_CHANNEL) {
+                        if (rxMsgType == MSG_TYPE_JOIN) {
+                            addUser(rxUsername);
+                        } else if (rxMsgType == MSG_TYPE_PART) {
+                            removeUser(rxUsername);
+                        }
                         resetRxState();
+                        return false; // Not a file, but state changed
+                    }
+                    
+                    // Audio file - try to open, but even if it fails we need to consume the data
+                    rxBytesReceived = 0;
+                    if (!openRxFile()) {
+                        // File creation failed, but we still need to consume the incoming data
+                        // to keep the protocol in sync
+                        sendLog("Will discard incoming audio data");
+                        rxState = RX_DISCARD_DATA;
                     } else {
                         rxState = RX_READ_DATA;
                     }
@@ -203,8 +355,19 @@ bool SerialProtocol::processIncoming()
                     // File complete
                     rxFile.close();
                     rxFileReady = true;
+                    sendLogf("File complete: %lu bytes", rxBytesReceived);
                     resetRxState();
                     return true;
+                }
+                break;
+
+            case RX_DISCARD_DATA:
+                // Discard byte but keep counting
+                rxBytesReceived++;
+                
+                if (rxBytesReceived >= rxFileLength) {
+                    sendLogf("Discarded %lu bytes", rxBytesReceived);
+                    resetRxState();
                 }
                 break;
         }
