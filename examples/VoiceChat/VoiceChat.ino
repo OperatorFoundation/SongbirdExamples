@@ -61,7 +61,6 @@ void processIdleState();
 void processRecordingState();
 void processPlayingState();
 void processSwitchingState();
-void processDisconnectedState();
 
 void startRecording();
 void stopRecording();
@@ -79,29 +78,42 @@ void processSerial();
 
 void setup()
 {
+    // Initialize serial for protocol (not debug)
     Serial.begin(SERIAL_BAUD_RATE);
-
-    // Small delay for hardware to stabilize
     delay(100);
 
-    // Initialize I2C for display
-    Wire1.begin();
+    // Initialize LEDs
+    leds.begin();
+
+    // Initialize I2C for display - set pins before begin
     Wire1.setSDA(OLED_SDA_PIN);
     Wire1.setSCL(OLED_SCL_PIN);
+    Wire1.begin();
+    delay(50);
 
-    // Initialize display first so we can show status
-    bool displayOk = display.begin();
-    if (displayOk)
+    // Initialize display
+    if (display.begin())
     {
         display.showStartupScreen();
         display.update();
     }
-    delay(1500);
+    delay(1000);
 
-    // Initialize subsystems
+    // Initialize UI
     ui.begin();
-    leds.begin();
-    storage.begin();
+
+    // Initialize SD card
+    SD.begin(SDCARD_CS_PIN);
+
+    // Create directories
+    SD.mkdir("/RX");
+    SD.mkdir(TX_DIR);
+    for (uint8_t i = 0; i < NUM_CHANNELS; i++)
+    {
+        char dirPath[24];
+        snprintf(dirPath, sizeof(dirPath), "%s%d", RX_DIR_PREFIX, i + 1);
+        SD.mkdir(dirPath);
+    }
 
     // Initialize settings
     currentSettings.currentChannel = DEFAULT_CHANNEL;
@@ -111,27 +123,16 @@ void setup()
     currentSettings.muted = false;
 
     // Initialize audio
-    if (!audioSystem.begin())
-    {
-        currentState = STATE_ERROR;
-        currentError = ERROR_NO_SD_CARD;
-    }
-    else
-    {
-        audioSystem.setMicGain(currentSettings.micGain);
-        audioSystem.enableAutoGainControl(currentSettings.agcEnabled);
-        audioSystem.setPlaybackVolume(currentSettings.playbackVolume);
-    }
+    audioSystem.begin();
+    audioSystem.setMicGain(currentSettings.micGain);
+    audioSystem.enableAutoGainControl(currentSettings.agcEnabled);
+    audioSystem.setPlaybackVolume(currentSettings.playbackVolume);
+
+    // Initialize storage
+    storage.begin();
 
     // Initialize recording engine
-    if (!recorder.begin())
-    {
-        if (currentState != STATE_ERROR)
-        {
-            currentState = STATE_ERROR;
-            currentError = recorder.getLastError();
-        }
-    }
+    recorder.begin();
 
     // Initialize playback engine
     player.begin();
@@ -139,23 +140,14 @@ void setup()
     // Initialize serial protocol
     protocol.begin(&Serial);
 
-    // Load initial channel queue
-    player.loadChannelQueue(currentSettings.currentChannel);
-    queuedMessages[currentSettings.currentChannel] = player.getQueuedCount();
+    // Don't auto-load queue - it's finding phantom messages
+    // player.loadChannelQueue(currentSettings.currentChannel);
+    // queuedMessages[currentSettings.currentChannel] = player.getQueuedCount();
 
-    if (currentState != STATE_ERROR)
-    {
-        currentState = STATE_IDLE;
-    }
-    
-    // Always show initial display state
-    if (displayOk)
-    {
-        updateDisplay();
-    }
-    
-    // Set LED based on connection (starts disconnected)
+    currentState = STATE_IDLE;
     leds.setBlueLED(false);
+    
+    updateDisplay();
 }
 
 // =============================================================================
@@ -182,8 +174,7 @@ void loop()
         case STATE_RECORDING:   processRecordingState(); break;
         case STATE_PLAYING:     processPlayingState(); break;
         case STATE_SWITCHING:   processSwitchingState(); break;
-        case STATE_DISCONNECTED: processDisconnectedState(); break;
-        case STATE_ERROR:       break;
+        default: break;
     }
 
     updateDisplay();
@@ -195,11 +186,11 @@ void loop()
 
 void processIdleState()
 {
-    // Auto-play queued messages if not muted
-    if (!currentSettings.muted && player.hasMessages() && !player.isPlaying())
-    {
-        startPlayback();
-    }
+    // Auto-play disabled for now until phantom message issue is fixed
+    // if (!currentSettings.muted && player.hasMessages())
+    // {
+    //     startPlayback();
+    // }
 }
 
 void processRecordingState()
@@ -219,12 +210,12 @@ void processRecordingState()
 
 void processPlayingState()
 {
-    // Feed audio to playback queue
     AudioPlayQueue* playQueue = audioSystem.getPlayQueue();
 
     if (!player.processPlayback(playQueue))
     {
         stopPlayback();
+        return;
     }
 
     currentMessageDuration = player.getFileDuration();
@@ -236,15 +227,6 @@ void processSwitchingState()
     if (channelSwitchTimer >= CHANNEL_SWITCH_DISPLAY_MS)
     {
         currentState = STATE_IDLE;
-    }
-}
-
-void processDisconnectedState()
-{
-    if (isConnected)
-    {
-        currentState = STATE_IDLE;
-        leds.setBlueLED(true);
     }
 }
 
@@ -260,13 +242,11 @@ void startRecording()
         player.pausePlayback();
     }
 
-    // Start recording to file
     if (!recorder.startRecording(currentSettings.currentChannel))
     {
         return;
     }
 
-    // Start the audio queue
     audioSystem.getRecordQueue()->begin();
 
     currentState = STATE_RECORDING;
@@ -279,10 +259,8 @@ void startRecording()
 
 void stopRecording()
 {
-    // Stop audio queue
     audioSystem.getRecordQueue()->end();
 
-    // Finalize recording
     recorder.stopRecording();
 
     // Send the recorded file over serial
@@ -290,8 +268,6 @@ void stopRecording()
     if (filepath.length() > 0)
     {
         protocol.sendFile(filepath.c_str(), currentSettings.currentChannel);
-        
-        // Delete local TX file after sending
         SD.remove(filepath.c_str());
     }
 
@@ -331,6 +307,7 @@ void startPlayback()
 void stopPlayback()
 {
     player.stopPlayback();
+    audioSystem.enableHeadphoneAmp(false);
     currentState = STATE_IDLE;
 
     queuedMessages[currentSettings.currentChannel] = player.getQueuedCount();
@@ -349,7 +326,6 @@ void switchChannel(int8_t direction)
 
     currentSettings.currentChannel = newChannel;
 
-    // Load new channel's message queue
     player.loadChannelQueue(currentSettings.currentChannel);
     queuedMessages[currentSettings.currentChannel] = player.getQueuedCount();
 
@@ -371,12 +347,10 @@ void playChannelSwitchBeep()
 
 void processSerial()
 {
-    // Check for incoming files
     if (protocol.processIncoming())
     {
         if (protocol.hasReceivedFile())
         {
-            // Reload queue for current channel
             uint8_t rxChannel = protocol.getReceivedChannel();
             if (rxChannel == currentSettings.currentChannel)
             {
@@ -384,9 +358,7 @@ void processSerial()
                 queuedMessages[currentSettings.currentChannel] = player.getQueuedCount();
             }
             
-            // Flash LED to indicate new message
             leds.setPinkLED(128);
-            
             protocol.clearReceivedFile();
         }
     }
@@ -412,7 +384,7 @@ void updateDisplay()
             break;
         case STATE_RECORDING:
             display.showRecordingScreen(currentSettings.currentChannel,
-                                        recorder.getRecordingDuration() / 1000);
+                                        recordingTimer / 1000);
             break;
         case STATE_PLAYING:
             display.showPlayingScreen(currentSettings.currentChannel,
@@ -424,11 +396,10 @@ void updateDisplay()
             display.showChannelSwitch(currentSettings.currentChannel,
                                       queuedMessages[currentSettings.currentChannel]);
             break;
-        case STATE_DISCONNECTED:
-            display.showDisconnected();
-            break;
         case STATE_ERROR:
             display.showErrorScreen(currentError);
+            break;
+        default:
             break;
     }
 

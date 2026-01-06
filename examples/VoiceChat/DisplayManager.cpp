@@ -13,15 +13,23 @@ DisplayManager::DisplayManager() :
 
 bool DisplayManager::begin()
 {
-    if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS))
+    // Step up 3.3V VCC, I2C address, hard reset screen, don't initialize I2C
+    if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS, true, false))
     {
         return false;
     }
 
+    delay(50);
+
     // Rotate display 180 degrees
     display.setRotation(2);
 
+    delay(50);
+
     display.clearDisplay();
+
+    delay(50);
+
     display.setTextColor(SSD1306_WHITE);
     return true;
 }
