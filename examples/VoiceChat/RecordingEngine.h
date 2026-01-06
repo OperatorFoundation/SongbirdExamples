@@ -1,7 +1,7 @@
 /*
-* RecordingEngine.h - Recording management for field recorder
+ * RecordingEngine.h - Recording management for VoiceChat
  *
- * Handles WAV file creation, audio data writing, and file management
+ * Handles Opus-compressed audio recording and file management
  */
 
 #ifndef RECORDING_ENGINE_H
@@ -9,12 +9,16 @@
 
 #include <Arduino.h>
 #include <SD.h>
-#include <WAVMaker.h>
 #include <Audio.h>
-
 #include "Config.h"
+#include "OpusCodec.h"
 
-class RecordingEngine {
+// Opus file format: simple packet container
+// File structure: [packet_size:uint16][packet_data:bytes]...
+// Each packet is prefixed with its size for easy reading
+
+class RecordingEngine
+{
 public:
     RecordingEngine();
 
@@ -22,22 +26,19 @@ public:
     bool begin();
 
     // Recording control
-    bool startRecording();
+    bool startRecording(uint8_t channel);
     bool processRecording(AudioRecordQueue* queue);
     bool stopRecording();
     bool isRecording() const { return recording; }
 
     // File management
     String getCurrentFileName() const { return currentFileName; }
-    String generateNextFilename();
-    uint32_t scanExistingFiles();  // Returns count of existing files
     uint32_t getNextSequenceNumber() { return nextSequenceNumber; }
 
     // Status
-    uint32_t getRecordingDuration() const;  // In seconds
-    uint32_t getRecordingSize() const;      // In bytes
-    float getAvailableHours() const;        // Remaining SD card space in hours
-    uint32_t getFileCount() const { return fileCount; }
+    uint32_t getRecordingDuration() const;  // In milliseconds
+    uint32_t getRecordingSize() const;      // In bytes (compressed)
+    uint32_t getPacketCount() const { return packetCount; }
 
     // Error handling
     bool hasError() const { return lastError != ERROR_NONE; }
@@ -50,23 +51,24 @@ private:
     bool sdCardPresent;
     ErrorType lastError;
 
+    // Opus codec
+    OpusCodec codec;
+
     // Current recording
-    WAVMaker wavMaker;
+    File currentFile;
     String currentFileName;
     uint32_t recordingStartTime;
-    uint32_t lastAutoSaveTime;
     uint32_t bytesWritten;
+    uint32_t packetCount;
 
     // File management
-    uint32_t fileCount;
     uint32_t nextSequenceNumber;
 
     // Helper functions
     bool checkSDCard();
-    bool createRecordingsDirectory();
-    uint32_t findHighestSequenceNumber();
-    void setNextSequenceNumber(uint32_t seq);
-    uint64_t getSDCardFreeSpace() const;
+    bool createDirectories();
+    String generateFilename(uint8_t channel);
+    bool writePacket(const uint8_t* packet, size_t size);
 };
 
 #endif // RECORDING_ENGINE_H

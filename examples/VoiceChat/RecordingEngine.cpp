@@ -1,72 +1,76 @@
-//
-// Created by Mafalda on 8/30/25.
-//
-
 /*
- * RecordingEngine.cpp - Recording implementation
+ * RecordingEngine.cpp - Opus-compressed recording implementation
  */
 
 #include "RecordingEngine.h"
-#include "Config.h"
-#include <TimeLib.h>
-#include <WAVMaker.h>
 
 RecordingEngine::RecordingEngine()
+    : recording(false), sdCardPresent(false), lastError(ERROR_NONE),
+      recordingStartTime(0), bytesWritten(0), packetCount(0),
+      nextSequenceNumber(1)
 {
-    recording = false;
-    sdCardPresent = false;
-    lastError = ERROR_NONE;
-    recordingStartTime = 0;
-    lastAutoSaveTime = 0;
-    bytesWritten = 0;
-    fileCount = 0;
-    nextSequenceNumber = 1; // Loads from EEPROM
-    currentFileName = "";
 }
 
 bool RecordingEngine::begin()
 {
-    // Initialize the SD card
-    if (!checkSDCard()) {
-        // FIXME: checkSDCard should set the error so that the specific issue can be reported
+    // Initialize SD card
+    if (!checkSDCard())
+    {
         lastError = ERROR_NO_SD_CARD;
         return false;
     }
 
-    // Create recording directory if it doesn't exist
-    if (!createRecordingsDirectory()) {
-        DEBUG_PRINTLN("Warning: Could not create recordings directory");
+    // Create directory structure
+    if (!createDirectories())
+    {
+        DEBUG_PRINTLN("Warning: Could not create directories");
     }
 
-    // Scan existing files to get the count
-    fileCount = scanExistingFiles();
-    DEBUG_PRINTF("Found %d existing recordings\n", fileCount);
-
-    // Find the highest sequence number from existing filenames
-    // This helps if EEPROM was reset but files still exist
-    uint32_t highestSequenceNumber = findHighestSequenceNumber();
-
-    // nextSequence number is set from EEPROM in main
-    // But let's make sure it's higher than the highestSequenceNumber we just found
-    if (nextSequenceNumber <= highestSequenceNumber) {
-        nextSequenceNumber = highestSequenceNumber + 1;
-        DEBUG_PRINTF("Adjusted sequence number to %d based on existing files\n", nextSequenceNumber);
+    // Initialize Opus codec
+    if (!codec.begin())
+    {
+        DEBUG_PRINTLN("Failed to initialize Opus codec");
+        return false;
     }
 
+    // Scan for highest sequence number in TX directory
+    File txDir = SD.open(TX_DIR);
+    if (txDir)
+    {
+        uint32_t highest = 0;
+        while (true)
+        {
+            File entry = txDir.openNextFile();
+            if (!entry) break;
+
+            String name = entry.name();
+            entry.close();
+
+            // Parse MSG_NNNNN.opus
+            if (name.startsWith("MSG_") && name.endsWith(".opus"))
+            {
+                uint32_t num = name.substring(4, 9).toInt();
+                if (num > highest) highest = num;
+            }
+        }
+        txDir.close();
+        nextSequenceNumber = highest + 1;
+    }
+
+    DEBUG_PRINTF("RecordingEngine initialized, next seq: %d\n", nextSequenceNumber);
     return true;
 }
 
 bool RecordingEngine::checkSDCard()
 {
-    // Check for physical card presence if detect pin is available
     if (digitalRead(SDCARD_DETECT_PIN) == HIGH)
     {
         sdCardPresent = false;
         return false;
     }
 
-    // Try to initialize the SD card
-    if (!SD.begin(SDCARD_CS_PIN)) {
+    if (!SD.begin(SDCARD_CS_PIN))
+    {
         sdCardPresent = false;
         return false;
     }
@@ -75,132 +79,80 @@ bool RecordingEngine::checkSDCard()
     return true;
 }
 
-bool RecordingEngine::createRecordingsDirectory()
+bool RecordingEngine::createDirectories()
 {
-    if (!sdCardPresent)
+    if (!sdCardPresent) return false;
+
+    // Create TX directory
+    if (!SD.exists(TX_DIR))
     {
-        return false;
+        if (!SD.mkdir(TX_DIR))
+        {
+            DEBUG_PRINTLN("Failed to create TX directory");
+            return false;
+        }
     }
 
-    // Check if the directory exists
-    if (SD.exists(RECORDINGS_DIR))
+    // Create RX channel directories
+    for (uint8_t i = 0; i < NUM_CHANNELS; i++)
     {
-        return true;
+        String dirPath = String(RX_DIR_PREFIX) + String(i + 1);
+        if (!SD.exists(dirPath.c_str()))
+        {
+            SD.mkdir(dirPath.c_str());
+        }
     }
 
-    // Create the directory
-    return SD.mkdir(RECORDINGS_DIR);
+    return true;
 }
 
-String RecordingEngine::generateNextFilename()
+String RecordingEngine::generateFilename(uint8_t channel)
 {
-    // Format: REC_NNNNN.WAV (sequential)
-    char filename[RECORDER_MAX_FILENAME_LEN];
-    snprintf(filename, sizeof(filename), "%s/%s%05lu%s", RECORDINGS_DIR, FILE_PREFIX, nextSequenceNumber, FILE_EXTENSION);
-
+    // Format: /TX/MSG_NNNNN_CHx.opus
+    char filename[32];
+    snprintf(filename, sizeof(filename), "%s/MSG_%05lu_CH%d.opus",
+             TX_DIR, nextSequenceNumber, channel + 1);
     return String(filename);
 }
 
-uint32_t RecordingEngine::findHighestSequenceNumber()
-{
-    uint32_t highestSequenceNumber = 0;
-
-    File recordingsDirectory = SD.open(RECORDINGS_DIR);
-    if (!recordingsDirectory)
-    {
-        return 0;
-    }
-
-    while (true)
-    {
-        File entry = recordingsDirectory.openNextFile();
-
-        if (!entry)
-        {
-            break;
-        }
-
-        String entryName = entry.name();
-        entry.close();
-
-        // Check if the file matches our pattern
-        if (entryName.startsWith(FILE_PREFIX) && entryName.endsWith(FILE_EXTENSION))
-        {
-            // Extract the sequence number
-            int prefixLength = strlen(FILE_PREFIX);
-            int extensionPosition = entryName.lastIndexOf('.');
-
-            if (extensionPosition > prefixLength)
-            {
-                String numberString = entryName.substring(prefixLength, extensionPosition);
-                uint32_t number = numberString.toInt();
-
-                if (number > highestSequenceNumber && number < MAX_SEQUENCE_NUMBER)
-                {
-                    highestSequenceNumber = number;
-                }
-            }
-        }
-    }
-
-    recordingsDirectory.close();
-    return highestSequenceNumber;
-}
-
-void RecordingEngine::setNextSequenceNumber(uint32_t seq)
-{
-    nextSequenceNumber = seq;
-
-    if (nextSequenceNumber > MAX_SEQUENCE_NUMBER)
-    {
-        nextSequenceNumber = 1; // Wrap
-    }
-}
-
-bool RecordingEngine::startRecording()
+bool RecordingEngine::startRecording(uint8_t channel)
 {
     if (recording)
     {
-        return false;   // We're already recording
+        DEBUG_PRINTLN("Already recording");
+        return false;
     }
 
-    // Check the SD card
-    if (!checkSDCard()) {
+    if (!checkSDCard())
+    {
         lastError = ERROR_NO_SD_CARD;
         return false;
     }
 
-    // Check available space (we need at least 10MB)
-    if (getSDCardFreeSpace() < 10 * 1024 * 1024) {
-        lastError = ERROR_SD_CARD_FULL;
-        return false;
-    }
-
     // Generate filename
-    currentFileName = generateNextFilename();
-    DEBUG_PRINTF("Starting recording to %s\n", currentFileName.c_str());
+    currentFileName = generateFilename(channel);
+    DEBUG_PRINTF("Starting recording: %s\n", currentFileName.c_str());
 
-    // Configure WAVMaker for field recording
-    wavMaker = WAVMaker::teensyAudioRecording(currentFileName.c_str(), false);
-    wavMaker.bufferSize(WAV_BUFFER_SIZE);
-    
-    // wavMaker = WAVMaker::configure(currentFileName.c_str())
-    //     .sampleRate(RATE_44100)          // Teensy Audio Library native rate
-    //     .channels(MONO)                  // Mono for voice recording
-    //     .bitsPerSample(BITS_16)
-    //     .bufferSize(WAV_BUFFER_SIZE)     // Large buffer for reliability
-    //     .overwriteExisting(false);       // Never overwrite
-
-    if (wavMaker.getLastError() != OK)
+    // Open file
+    currentFile = SD.open(currentFileName.c_str(), FILE_WRITE);
+    if (!currentFile)
     {
-        DEBUG_PRINTF("WAVMaker config error: %s\n", wavMaker.getLastErrorString());
+        DEBUG_PRINTLN("Failed to create file");
+        lastError = ERROR_FILE_CREATE_FAILED;
         return false;
     }
+
+    // Write file header (simple magic + version)
+    const uint8_t header[] = {'O', 'P', 'U', 'S', 0x01, 0x00};  // "OPUS" + version 1.0
+    currentFile.write(header, sizeof(header));
+    bytesWritten = sizeof(header);
+
+    // Reset codec state
+    codec.resetEncoder();
 
     // Reset counters
     recordingStartTime = millis();
-    lastAutoSaveTime = millis();
-    bytesWritten = 0;
+    packetCount = 0;
     recording = true;
 
     return true;
@@ -208,158 +160,116 @@ bool RecordingEngine::startRecording()
 
 bool RecordingEngine::processRecording(AudioRecordQueue* queue)
 {
-    if (!recording || !queue)
-    {
-        return false;
-    }
+    if (!recording || !queue) return false;
 
-    bool dataWritten = false;
+    bool dataProcessed = false;
 
-    // In processRecording(), before the while loop:
-    if (queue->available() == 0) return false; // No data to process
-
-    DEBUG_PRINTF("Processing %d audio blocks\n", queue->available());
-
-    // Process all available audio blocks
     while (queue->available() > 0)
     {
         int16_t* buffer = queue->readBuffer();
 
-        // Write audio data
-        if (wavMaker.write(buffer, AUDIO_BLOCK_SAMPLES)) {
-            bytesWritten += AUDIO_BLOCK_SAMPLES * sizeof(int16_t);
-            dataWritten = true;
-        }
-        else
-        {
-            DEBUG_PRINTF("WAVMaker write error: %s\n", wavMaker.getLastErrorString());
+        // Feed samples to Opus encoder
+        int result = codec.addSamples(buffer, AUDIO_BLOCK_SAMPLES);
 
-            // Write failed - try to save what we have
+        if (result < 0)
+        {
+            DEBUG_PRINTLN("Opus encoding error");
             lastError = ERROR_WRITE_FAILED;
-            stopRecording();
             queue->freeBuffer();
+            stopRecording();
             return false;
+        }
+
+        // Write any encoded packets
+        while (codec.hasEncodedPacket())
+        {
+            uint8_t packet[OPUS_MAX_PACKET_SIZE];
+            int packetSize = codec.getEncodedPacket(packet, sizeof(packet));
+
+            if (packetSize > 0)
+            {
+                if (!writePacket(packet, packetSize))
+                {
+                    lastError = ERROR_WRITE_FAILED;
+                    queue->freeBuffer();
+                    stopRecording();
+                    return false;
+                }
+                dataProcessed = true;
+            }
         }
 
         queue->freeBuffer();
     }
 
-    // Auto-save periodically
-    if ((millis() - lastAutoSaveTime) > AUTO_SAVE_INTERVAL_MS) {
-        wavMaker.flush();
-        lastAutoSaveTime = millis();
-        DEBUG_PRINTLN("Auto-saved recording");
+    return dataProcessed;
+}
+
+bool RecordingEngine::writePacket(const uint8_t* packet, size_t size)
+{
+    if (!currentFile) return false;
+
+    // Write packet size (2 bytes, little-endian)
+    uint16_t packetSize = (uint16_t)size;
+    if (currentFile.write((uint8_t*)&packetSize, 2) != 2)
+    {
+        DEBUG_PRINTLN("Failed to write packet size");
+        return false;
     }
 
-    return dataWritten;
+    // Write packet data
+    if (currentFile.write(packet, size) != size)
+    {
+        DEBUG_PRINTLN("Failed to write packet data");
+        return false;
+    }
+
+    bytesWritten += 2 + size;
+    packetCount++;
+
+    // Flush periodically
+    if (packetCount % 50 == 0)
+    {
+        currentFile.flush();
+    }
+
+    return true;
 }
 
 bool RecordingEngine::stopRecording()
 {
-    if (!recording)
-    {
-        return false;
-    }
+    if (!recording) return false;
 
     recording = false;
 
-    // Close the WAV file (header will be automatically updated with the final size)
-    bool success = wavMaker.close();
-
-    if (success) {
-        fileCount++;
-        nextSequenceNumber++;
-        DEBUG_PRINTF("Recording saved: %s (%.1f seconds)\n", currentFileName.c_str(), getRecordingDuration() / 1000.0);
-    }
-    else
+    // Close file
+    if (currentFile)
     {
-        lastError = ERROR_WRITE_FAILED;
-        DEBUG_PRINTLN("Failed to close WAV file");
+        currentFile.flush();
+        currentFile.close();
     }
 
-    return success;
-}
+    nextSequenceNumber++;
 
-uint32_t RecordingEngine::getRecordingSize() const {
-    return bytesWritten;
+    DEBUG_PRINTF("Recording saved: %s\n", currentFileName.c_str());
+    DEBUG_PRINTF("  Duration: %lu ms\n", getRecordingDuration());
+    DEBUG_PRINTF("  Size: %lu bytes\n", bytesWritten);
+    DEBUG_PRINTF("  Packets: %lu\n", packetCount);
+
+    return true;
 }
 
 uint32_t RecordingEngine::getRecordingDuration() const
 {
     if (recording)
     {
-        return millis() - recordingStartTime;  // Current duration in ms
+        return millis() - recordingStartTime;
     }
-    
-    // If not recording, calculate from WAVMaker data
-    return (uint32_t)(wavMaker.getDuration() * 1000.0);  // Convert seconds to ms
-
-    return 0;
+    // Estimate from packet count (each packet = 20ms)
+    return packetCount * OPUS_FRAME_MS;
 }
 
-float RecordingEngine::getAvailableHours() const
+uint32_t RecordingEngine::getRecordingSize() const
 {
-    uint64_t freeSpace = getSDCardFreeSpace();
-
-    // Calculate based on the recording format
-    // 44,100 samples/second × 2 bytes/sample (16-bit = 2 bytes) × 1 channel = 88,200 bytes/second
-    uint32_t bytesPerSecond = RECORDING_SAMPLE_RATE * 2;  // 44100 * 2 = 88,200
-    uint32_t bytesPerHour = bytesPerSecond * 3600;        // 88,200 * 3600 = 317,520,000
-
-    return static_cast<float>(freeSpace) / static_cast<float>(bytesPerHour);
-}
-
-uint64_t RecordingEngine::getSDCardFreeSpace() const
-{
-    if (!sdCardPresent)
-    {
-        return 0;
-    }
-
-    // FIXME: The below doesn't work. Returning a dummy value of 1GB instead
-    // TODO: Consider switching to using the SDFat library directly, or submitting a request for volume to be made public
-    // // For Teensy using SdFat library (underlying SD library)
-    // uint32_t freeClusterCount = SD.vol()->freeClusterCount();
-    // uint32_t blocksPerCluster = SD.vol()->blocksPerCluster();
-    //
-    // // Each block is 512 bytes
-    // uint64_t freeSpace = (uint64_t)freeClusterCount *
-    //                      (uint64_t)blocksPerCluster * 512ULL;
-    //
-    // return freeSpace;
-
-    return 1073741824;
-}
-
-
-
-uint32_t RecordingEngine::scanExistingFiles()
-{
-    uint32_t count = 0;
-
-    File recordingsDirectory = SD.open(RECORDINGS_DIR);
-    if (!recordingsDirectory)
-    {
-        return 0;
-    }
-
-    while (count < MAX_FILES_TO_SCAN)
-    {
-        File entry = recordingsDirectory.openNextFile();
-        if (!entry) {
-            break;
-        }
-
-        String entryName = entry.name();
-        entry.close();
-
-        // Only count WAV files with the expected naming pattern
-        if (entryName.startsWith(FILE_PREFIX) && entryName.endsWith(FILE_EXTENSION))
-        {
-            count++;
-        }
-    }
-
-    recordingsDirectory.close();
-    return count;
+    return bytesWritten;
 }

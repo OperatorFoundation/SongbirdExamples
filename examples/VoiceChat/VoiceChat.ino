@@ -1,49 +1,37 @@
 /*
  * VoiceChat.ino - Songbird VoiceChat
  *
- * A push-to-talk voice chat application with end-to-end encryption
- *
- * Features:
- * - Push-to-talk recording (PTT button)
- * - Multi-channel support (5 channels)
- * - Queue-based non-realtime messaging
- * - End-to-end encryption (AES-GCM-128)
- * - Codec2 compression for bandwidth efficiency
- * - USB Serial transport (future: LoRa)
- *
- * Button controls:
- * - TOP (UP): Push-to-Talk (hold to record, release to send)
- * - LEFT: Previous channel
- * - RIGHT: Next channel
- * - CENTER (DOWN): Skip current message / Long press to mute
- *
- * Version: 1.0.0
- * Author: Operator Foundation
- * License: MIT
+ * Push-to-talk voice chat with Opus compression.
+ * Records complete messages, then transfers as files.
  */
 
 #include <Arduino.h>
 #include <Wire.h>
 #include <Audio.h>
+#include <SD.h>
 
-// Include all modules
 #include "Config.h"
 #include "AudioSystem.h"
 #include "DisplayManager.h"
 #include "UIController.h"
 #include "LEDControl.h"
 #include "StorageManager.h"
+#include "RecordingEngine.h"
+#include "PlaybackEngine.h"
+#include "SerialProtocol.h"
 
 // =============================================================================
 // Global Objects
 // =============================================================================
 
-// Core modules
 AudioSystem audioSystem;
 DisplayManager display;
 UIController ui;
 LEDControl leds;
 StorageManager storage;
+RecordingEngine recorder;
+PlaybackEngine player;
+SerialProtocol protocol;
 
 // System state
 SystemState currentState = STATE_IDLE;
@@ -56,12 +44,11 @@ Settings currentSettings;
 elapsedMillis displayUpdateTimer = 0;
 elapsedMillis recordingTimer = 0;
 elapsedMillis channelSwitchTimer = 0;
-elapsedMillis connectionCheckTimer = 0;
 elapsedMillis playbackTimer = 0;
 
 // State variables
-bool isConnected = true;  // Assume connected initially
-uint8_t queuedMessages[NUM_CHANNELS] = {0};  // Messages queued per channel
+bool isConnected = false;
+uint8_t queuedMessages[NUM_CHANNELS] = {0};
 bool wasPlayingBeforePTT = false;
 String currentSender = "";
 uint32_t currentMessageDuration = 0;
@@ -70,29 +57,21 @@ uint32_t currentMessageDuration = 0;
 // Forward Declarations
 // =============================================================================
 
-// State processing functions
 void processIdleState();
 void processRecordingState();
 void processPlayingState();
 void processSwitchingState();
 void processDisconnectedState();
 
-// State transition functions
 void startRecording();
 void stopRecording();
 void startPlayback();
 void stopPlayback();
-void switchChannel(int8_t direction);  // -1 for left, +1 for right
+void switchChannel(int8_t direction);
 void playChannelSwitchBeep();
-
-// Display function
 void updateDisplay();
-
-// Buttons
 void handleButtonEvents();
-
-// Connection
-void checkConnection();
+void processSerial();
 
 // =============================================================================
 // Setup
@@ -100,83 +79,83 @@ void checkConnection();
 
 void setup()
 {
-    // Initialize serial for communication and debugging
     Serial.begin(SERIAL_BAUD_RATE);
-    
-    #ifdef DEBUG_MODE
-    // Wait briefly for serial connection (but don't block)
-    uint32_t startTime = millis();
-    while (!Serial && (millis() - startTime) < 3000) {
-        // Wait for serial or timeout
-    }
 
-    Serial.println("\n========================================");
-    Serial.println("Songbird VoiceChat");
-    Serial.println("Version: " FIRMWARE_VERSION);
-    Serial.println("========================================\n");
-    #endif
+    // Small delay for hardware to stabilize
+    delay(100);
 
     // Initialize I2C for display
     Wire1.begin();
     Wire1.setSDA(OLED_SDA_PIN);
     Wire1.setSCL(OLED_SCL_PIN);
 
-    // Initialize display
-    if (!display.begin())
+    // Initialize display first so we can show status
+    bool displayOk = display.begin();
+    if (displayOk)
     {
-        DEBUG_PRINTLN("Display initialization failed");
-        // Continue anyway - can work without display
+        display.showStartupScreen();
+        display.update();
     }
+    delay(1500);
 
-    display.showStartupScreen();
-    display.update();
-    delay(2000);  // Show startup screen briefly
-
-    // Initialize UI
+    // Initialize subsystems
     ui.begin();
-    ui.update();
-
-    // Initialize LEDs
     leds.begin();
-
-    // Initialize storage
     storage.begin();
 
     // Initialize settings
-    currentSettings.currentChannel = 0;  // Channel 1 (0-indexed)
+    currentSettings.currentChannel = DEFAULT_CHANNEL;
     currentSettings.micGain = DEFAULT_MIC_GAIN;
     currentSettings.playbackVolume = DEFAULT_PLAYBACK_VOLUME;
     currentSettings.agcEnabled = true;
     currentSettings.muted = false;
 
-    // Initialize audio system
+    // Initialize audio
     if (!audioSystem.begin())
     {
-        DEBUG_PRINTLN("Audio system initialization failed");
-        currentState = STATE_DISCONNECTED;
-        currentError = ERROR_NONE;
+        currentState = STATE_ERROR;
+        currentError = ERROR_NO_SD_CARD;
     }
     else
     {
-        // Apply settings
         audioSystem.setMicGain(currentSettings.micGain);
         audioSystem.enableAutoGainControl(currentSettings.agcEnabled);
         audioSystem.setPlaybackVolume(currentSettings.playbackVolume);
     }
 
-    // Create channel directories
-    for (uint8_t i = 0; i < NUM_CHANNELS; i++)
+    // Initialize recording engine
+    if (!recorder.begin())
     {
-        String dirPath = String(RX_DIR_PREFIX) + String(i + 1);
-        SD.mkdir(dirPath.c_str());
+        if (currentState != STATE_ERROR)
+        {
+            currentState = STATE_ERROR;
+            currentError = recorder.getLastError();
+        }
     }
-    SD.mkdir(TX_DIR);
 
-    DEBUG_PRINTLN("\nInitialization complete");
-    DEBUG_PRINTLN("========================================\n");
+    // Initialize playback engine
+    player.begin();
+
+    // Initialize serial protocol
+    protocol.begin(&Serial);
+
+    // Load initial channel queue
+    player.loadChannelQueue(currentSettings.currentChannel);
+    queuedMessages[currentSettings.currentChannel] = player.getQueuedCount();
+
+    if (currentState != STATE_ERROR)
+    {
+        currentState = STATE_IDLE;
+    }
     
-    // Set initial LED state
-    leds.setBlueLED(true);  // Show connected
+    // Always show initial display state
+    if (displayOk)
+    {
+        updateDisplay();
+    }
+    
+    // Set LED based on connection (starts disconnected)
+    leds.setBlueLED(false);
 }
 
 // =============================================================================
@@ -185,125 +164,145 @@ void setup()
 
 void loop()
 {
-    // Update UI
     ui.update();
-
-    // Update LED animations
     leds.update();
 
-    // Check connection status periodically
-    checkConnection();
+    // Process serial communication
+    processSerial();
 
-    // Handle button events
+    // Update connection status
+    isConnected = protocol.isConnected();
+    leds.setBlueLED(isConnected);
+
     handleButtonEvents();
 
-    // Handle state-specific processing
-    switch (currentState) 
+    switch (currentState)
     {
-        case STATE_IDLE: processIdleState(); break;
-        case STATE_RECORDING: processRecordingState(); break;
-        case STATE_PLAYING: processPlayingState(); break;
-        case STATE_SWITCHING: processSwitchingState(); break;
+        case STATE_IDLE:        processIdleState(); break;
+        case STATE_RECORDING:   processRecordingState(); break;
+        case STATE_PLAYING:     processPlayingState(); break;
+        case STATE_SWITCHING:   processSwitchingState(); break;
         case STATE_DISCONNECTED: processDisconnectedState(); break;
+        case STATE_ERROR:       break;
     }
 
-    // Update display if needed
     updateDisplay();
 }
 
 // =============================================================================
-// State Processing Functions
+// State Processing
 // =============================================================================
 
 void processIdleState()
 {
-    // TODO: Check for incoming messages in queue and start playback
-    // For now, just idle
+    // Auto-play queued messages if not muted
+    if (!currentSettings.muted && player.hasMessages() && !player.isPlaying())
+    {
+        startPlayback();
+    }
 }
 
 void processRecordingState()
 {
-    // TODO: Process audio recording to queue
-    // For now, just track time
+    // Process audio from queue to encoder
+    AudioRecordQueue* queue = audioSystem.getRecordQueue();
+    recorder.processRecording(queue);
+
+    // Update audio level display
+    float level = audioSystem.getPeakLevel();
+    leds.setAudioLevel(level);
+    if (audioSystem.isClipping())
+    {
+        leds.setClipping(true);
+    }
 }
 
 void processPlayingState()
 {
-    // TODO: Check if playback finished
-    // For now, simulate playback
-    
-    // Placeholder: auto-stop after simulated duration
-    if (playbackTimer > currentMessageDuration * 1000)
+    // Feed audio to playback queue
+    AudioPlayQueue* playQueue = audioSystem.getPlayQueue();
+
+    if (!player.processPlayback(playQueue))
     {
         stopPlayback();
     }
+
+    currentMessageDuration = player.getFileDuration();
+    currentSender = player.getSenderName();
 }
 
 void processSwitchingState()
 {
-    // Wait for channel switch animation to complete
     if (channelSwitchTimer >= CHANNEL_SWITCH_DISPLAY_MS)
     {
         currentState = STATE_IDLE;
-        DEBUG_PRINTLN("Channel switch complete");
     }
 }
 
 void processDisconnectedState()
 {
-    // Check if connection restored
     if (isConnected)
     {
         currentState = STATE_IDLE;
         leds.setBlueLED(true);
-        DEBUG_PRINTLN("Connection restored");
     }
 }
 
 // =============================================================================
-// State Transition Functions
+// State Transitions
 // =============================================================================
 
 void startRecording()
 {
-    DEBUG_PRINTLN("Starting recording (PTT)");
-
-    // If we were playing, pause playback
     if (currentState == STATE_PLAYING)
     {
         wasPlayingBeforePTT = true;
-        // TODO: Pause playback
+        player.pausePlayback();
     }
+
+    // Start recording to file
+    if (!recorder.startRecording(currentSettings.currentChannel))
+    {
+        return;
+    }
+
+    // Start the audio queue
+    audioSystem.getRecordQueue()->begin();
 
     currentState = STATE_RECORDING;
     recordingTimer = 0;
 
-    // Configure audio for recording
     audioSystem.enableInputMonitoring(true);
-
-    // Set LED indicators
     leds.setRecording(true);
-    leds.setBlueLED(false);  // Dim blue during recording
+    leds.setBlueLED(false);
 }
 
 void stopRecording()
 {
-    DEBUG_PRINTLN("Stopping recording (PTT released)");
+    // Stop audio queue
+    audioSystem.getRecordQueue()->end();
 
-    // TODO: Save recording to TX queue
+    // Finalize recording
+    recorder.stopRecording();
 
-    // Disable input monitoring
+    // Send the recorded file over serial
+    String filepath = recorder.getCurrentFileName();
+    if (filepath.length() > 0)
+    {
+        protocol.sendFile(filepath.c_str(), currentSettings.currentChannel);
+        
+        // Delete local TX file after sending
+        SD.remove(filepath.c_str());
+    }
+
     audioSystem.enableInputMonitoring(false);
-
-    // Clear recording LED
     leds.setRecording(false);
-    leds.setBlueLED(true);
+    leds.setBlueLED(isConnected);
 
-    // Resume playback if we were playing before
     if (wasPlayingBeforePTT)
     {
         wasPlayingBeforePTT = false;
-        // TODO: Resume playback
+        player.resumePlayback(audioSystem.getPlayQueue());
         currentState = STATE_PLAYING;
     }
     else
@@ -314,145 +313,122 @@ void stopRecording()
 
 void startPlayback()
 {
-    DEBUG_PRINTLN("Starting playback");
-    
+    AudioPlayQueue* playQueue = audioSystem.getPlayQueue();
+
+    if (!player.startPlayback(playQueue))
+    {
+        return;
+    }
+
     currentState = STATE_PLAYING;
     playbackTimer = 0;
-    
-    // TODO: Actually start playing from queue
-    // For now, simulate with placeholder values
-    currentSender = "Alice";
-    currentMessageDuration = 5;  // 5 seconds placeholder
-    
-    // Set LED to pulsing
-    // TODO: Add pulse animation to LEDControl
+    currentSender = player.getSenderName();
+    currentMessageDuration = player.getFileDuration();
+
+    audioSystem.enableHeadphoneAmp(true);
 }
 
 void stopPlayback()
 {
-    DEBUG_PRINTLN("Stopping playback");
-    
-    // TODO: Stop actual playback
-    
+    player.stopPlayback();
     currentState = STATE_IDLE;
-    queuedMessages[currentSettings.currentChannel]--;
+
+    queuedMessages[currentSettings.currentChannel] = player.getQueuedCount();
 }
 
 void switchChannel(int8_t direction)
 {
-    DEBUG_PRINTF("Switching channel (direction: %d)\n", direction);
-
-    // Stop any current playback
     if (currentState == STATE_PLAYING)
     {
-        stopPlayback();
+        player.stopPlayback();
     }
 
-    // Calculate new channel (with wrapping)
     int8_t newChannel = currentSettings.currentChannel + direction;
-    if (newChannel < 0)
-    {
-        newChannel = NUM_CHANNELS - 1;
-    }
-    else if (newChannel >= NUM_CHANNELS)
-    {
-        newChannel = 0;
-    }
+    if (newChannel < 0) newChannel = NUM_CHANNELS - 1;
+    else if (newChannel >= NUM_CHANNELS) newChannel = 0;
 
     currentSettings.currentChannel = newChannel;
 
-    // Play beep
-    playChannelSwitchBeep();
+    // Load new channel's message queue
+    player.loadChannelQueue(currentSettings.currentChannel);
+    queuedMessages[currentSettings.currentChannel] = player.getQueuedCount();
 
-    // Show channel switch screen
+    playChannelSwitchBeep();
     currentState = STATE_SWITCHING;
     channelSwitchTimer = 0;
-
-    DEBUG_PRINTF("Switched to channel %d\n", currentSettings.currentChannel + 1);
-
-    // TODO: Start playing from new channel queue if messages exist
 }
 
 void playChannelSwitchBeep()
 {
-    // TODO: Generate a short beep tone
-    // For now, just flash the LED
     leds.setBlueLED(false);
     delay(BEEP_DURATION_MS);
-    leds.setBlueLED(true);
+    leds.setBlueLED(isConnected);
 }
 
 // =============================================================================
-// Connection Management
+// Serial Communication
 // =============================================================================
 
-void checkConnection()
+void processSerial()
 {
-    // For now, always assume connected
-    // TODO: Implement actual connection checking via serial protocol
-    isConnected = true;
-
-    if (!isConnected && currentState != STATE_DISCONNECTED)
+    // Check for incoming files
+    if (protocol.processIncoming())
     {
-        DEBUG_PRINTLN("Connection lost");
-        currentState = STATE_DISCONNECTED;
-        leds.setBlueLED(false);
+        if (protocol.hasReceivedFile())
+        {
+            // Reload queue for current channel
+            uint8_t rxChannel = protocol.getReceivedChannel();
+            if (rxChannel == currentSettings.currentChannel)
+            {
+                player.loadChannelQueue(currentSettings.currentChannel);
+                queuedMessages[currentSettings.currentChannel] = player.getQueuedCount();
+            }
+            
+            // Flash LED to indicate new message
+            leds.setPinkLED(128);
+            
+            protocol.clearReceivedFile();
+        }
     }
 }
 
 // =============================================================================
-// Display Update Function
+// Display
 // =============================================================================
 
 void updateDisplay()
 {
-    // Determine update rate based on state
-    uint32_t updateInterval = (currentState == STATE_IDLE) ? 
-                              DISPLAY_IDLE_UPDATE_MS : DISPLAY_UPDATE_MS;
+    uint32_t interval = (currentState == STATE_IDLE) ?
+                        DISPLAY_IDLE_UPDATE_MS : DISPLAY_UPDATE_MS;
 
-    if (displayUpdateTimer < updateInterval)
-    {
-        return;  // Not time to update yet
-    }
-
+    if (displayUpdateTimer < interval) return;
     displayUpdateTimer = 0;
 
-    // Update based on current state
-    switch (currentState) 
+    switch (currentState)
     {
         case STATE_IDLE:
-            display.showIdleScreen(
-                currentSettings.currentChannel,
-                isConnected,
-                queuedMessages[currentSettings.currentChannel]
-            );
+            display.showIdleScreen(currentSettings.currentChannel, isConnected,
+                                   queuedMessages[currentSettings.currentChannel]);
             break;
-
         case STATE_RECORDING:
-            display.showRecordingScreen(
-                currentSettings.currentChannel,
-                recordingTimer / 1000
-            );
+            display.showRecordingScreen(currentSettings.currentChannel,
+                                        recorder.getRecordingDuration() / 1000);
             break;
-
         case STATE_PLAYING:
-            display.showPlayingScreen(
-                currentSettings.currentChannel,
-                playbackTimer / 1000,
-                currentMessageDuration,
-                currentSender
-            );
+            display.showPlayingScreen(currentSettings.currentChannel,
+                                      player.getPlaybackPosition() / 1000,
+                                      player.getFileDuration() / 1000,
+                                      player.getSenderName());
             break;
-
         case STATE_SWITCHING:
-            display.showChannelSwitch(
-                currentSettings.currentChannel,
-                queuedMessages[currentSettings.currentChannel]
-            );
+            display.showChannelSwitch(currentSettings.currentChannel,
+                                      queuedMessages[currentSettings.currentChannel]);
             break;
-
         case STATE_DISCONNECTED:
             display.showDisconnected();
+            break;
+        case STATE_ERROR:
+            display.showErrorScreen(currentError);
             break;
     }
 
@@ -460,59 +436,62 @@ void updateDisplay()
 }
 
 // =============================================================================
-// Button Event Handling
+// Button Handling
 // =============================================================================
 
 void handleButtonEvents()
 {
-    // PTT Button (TOP/UP)
+    // PTT (TOP/UP button)
     if (ui.isPressed(BTN_UP))
     {
-        // PTT pressed - start recording if not already
-        if (currentState != STATE_RECORDING)
+        if (currentState != STATE_RECORDING && currentState != STATE_ERROR)
         {
             startRecording();
         }
     }
     else if (ui.wasJustReleased(BTN_UP))
     {
-        // PTT released - stop recording
         if (currentState == STATE_RECORDING)
         {
             stopRecording();
         }
     }
 
-    // Channel switching (only when not recording)
-    if (currentState != STATE_RECORDING)
+    // Channel switching (not while recording)
+    if (currentState != STATE_RECORDING && currentState != STATE_ERROR)
     {
         if (ui.wasJustPressed(BTN_LEFT))
         {
-            switchChannel(-1);  // Previous channel
+            switchChannel(-1);
         }
         else if (ui.wasJustPressed(BTN_RIGHT))
         {
-            switchChannel(1);   // Next channel
+            switchChannel(1);
         }
     }
 
-    // Skip/Mute button (CENTER/DOWN)
+    // Skip/Mute (CENTER/DOWN button)
     if (ui.wasJustPressed(BTN_DOWN))
     {
         if (currentState == STATE_PLAYING)
         {
-            // Skip current message
-            DEBUG_PRINTLN("Skipping message");
-            stopPlayback();
-            // TODO: Delete current message and play next
+            player.skipToNext();
+            queuedMessages[currentSettings.currentChannel] = player.getQueuedCount();
+
+            if (!player.isPlaying())
+            {
+                currentState = STATE_IDLE;
+            }
         }
     }
     else if (ui.isLongPressed(BTN_DOWN))
     {
-        // Toggle mute
         currentSettings.muted = !currentSettings.muted;
-        DEBUG_PRINTF("Mute: %s\n", currentSettings.muted ? "ON" : "OFF");
-        
-        // TODO: Show mute status on display briefly
+
+        if (currentSettings.muted && currentState == STATE_PLAYING)
+        {
+            player.stopPlayback();
+            currentState = STATE_IDLE;
+        }
     }
 }

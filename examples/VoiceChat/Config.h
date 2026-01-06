@@ -188,7 +188,7 @@ struct Settings {
 // ============================================================================
 
 // Uncomment for serial debug output
-#define DEBUG_MODE
+//#define DEBUG_MODE
 
 #ifdef DEBUG_MODE
   #define DEBUG_PRINT(x)     Serial.print(x)
@@ -223,5 +223,27 @@ struct Settings {
 #define RX_DIR_PREFIX         "/RX/CH"   // /RX/CH1/, /RX/CH2/, etc.
 #define TX_DIR                "/TX"      // Outgoing messages
 #define MAX_FILES_PER_CHANNEL 100        // Limit queue size per channel
+
+// ============================================================================
+// Opus Codec Configuration
+// ============================================================================
+
+#define OPUS_SAMPLE_RATE      16000     // 16kHz wideband voice
+#define OPUS_CHANNELS         1         // Mono
+#define OPUS_FRAME_MS         20        // 20ms frames (standard for voice)
+#define OPUS_BITRATE_DEFAULT  16000     // 16 kbps - good voice quality
+#define OPUS_BITRATE_MIN      8000      // 8 kbps - minimum for voice
+#define OPUS_BITRATE_MAX      32000     // 32 kbps - high quality
+#define OPUS_COMPLEXITY       5         // 0-10, balance quality/CPU
+#define OPUS_MAX_PACKET_SIZE  256       // Max encoded packet bytes
+
+// Calculated values
+#define OPUS_FRAME_SAMPLES    (OPUS_SAMPLE_RATE * OPUS_FRAME_MS / 1000)  // 320 samples
+
+// Resampling (44.1kHz <-> 16kHz)
+// Samples needed at 44.1kHz to produce one 16kHz frame:
+// 320 * (44100/16000) = 882 samples
+#define RESAMPLE_INPUT_SAMPLES  882
+#define RESAMPLE_OUTPUT_SAMPLES 882     // Output samples from one decoded frame
 
 #endif // CONFIG_H

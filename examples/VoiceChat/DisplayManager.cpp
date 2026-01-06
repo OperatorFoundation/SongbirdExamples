@@ -18,6 +18,9 @@ bool DisplayManager::begin()
         return false;
     }
 
+    // Rotate display 180 degrees
+    display.setRotation(2);
+
     display.clearDisplay();
     display.setTextColor(SSD1306_WHITE);
     return true;
