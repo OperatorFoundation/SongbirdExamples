@@ -81,10 +81,13 @@ AudioPlaySdMp3       mp3;
 AudioMixer4          mixerL;
 AudioMixer4          mixerR;
 AudioOutputI2S       i2s_out;
+AudioOutputUSB       usb_out;
 AudioConnection      patchCord1(mp3, 0, mixerL, 0);
 AudioConnection      patchCord2(mp3, 1, mixerR, 0);
 AudioConnection      patchCord3(mixerL, 0, i2s_out, 0);
 AudioConnection      patchCord4(mixerR, 0, i2s_out, 1);
+AudioConnection      patchCord5(mixerL, 0, usb_out, 0);
+AudioConnection      patchCord6(mixerR, 0, usb_out, 1);
 AudioControlSGTL5000 codec;
 
 // ============================================================
@@ -163,7 +166,8 @@ void showVolumeOverlay();
 // ============================================================
 // Setup
 // ============================================================
-void setup() {
+void setup()
+{
   Serial.begin(115200);
   
   pinMode(LED_1, OUTPUT);
@@ -177,9 +181,11 @@ void setup() {
   pinMode(SW_DOWN_PIN,  INPUT_PULLUP);
   
   Wire1.begin();
-  if (!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS))
+  {
     Serial.println("SSD1306 failed");
   }
+
   display.setRotation(2);
   display.clearDisplay();
   display.setTextSize(1);
@@ -190,7 +196,8 @@ void setup() {
   
   AudioMemory(20);
   
-  if (!codec.enable()) {
+  if(!codec.enable())
+  {
     display.clearDisplay();
     display.setCursor(0, 12);
     display.println("CODEC ERROR!");
@@ -198,18 +205,17 @@ void setup() {
     while (1);
   }
   
-  codec.inputSelect(AUDIO_INPUT_LINEIN);
-  codec.lineOutLevel(13);
+  codec.lineOutLevel(LINEOUT_DEFAULT);
   codec.unmuteLineout();
-  
-  mixerL.gain(0, 0.0);
-  mixerR.gain(0, 0.0);
-  
+
+  setVolume(0);
+
   SPI.setMOSI(11);
   SPI.setMISO(12);
   SPI.setSCK(13);
   
-  if (!SD.begin(SDCARD_CS_PIN)) {
+  if (!SD.begin(SDCARD_CS_PIN))
+  {
     display.clearDisplay();
     display.setCursor(0, 8);
     display.println("SD CARD ERROR!");
@@ -232,7 +238,8 @@ void setup() {
   // Ensure scanning message is visible for at least 1 second
   delay(1000);
   
-  if (albumCount == 0) {
+  if(albumCount == 0)
+  {
     display.clearDisplay();
     display.setCursor(0, 4);
     display.println("No albums found!");
@@ -256,7 +263,8 @@ void setup() {
 // ============================================================
 // Main Loop
 // ============================================================
-void loop() {
+void loop()
+{
   btnLeft.update();
   btnRight.update();
   btnUp.update();
@@ -264,14 +272,18 @@ void loop() {
   
   unsigned long now = millis();
   
-  if (btnUp.fallingEdge()) {
+  if (btnUp.fallingEdge())
+  {
     upPressTime = now;
     upHeld = false;
   }
   
-  if (btnUp.read() == LOW) {
-    if (now - upPressTime >= LONG_PRESS_MS) {
-      if (!upHeld || (now - lastVolumeChange >= VOLUME_REPEAT_MS)) {
+  if (btnUp.read() == LOW)
+  {
+    if (now - upPressTime >= LONG_PRESS_MS)
+    {
+      if (!upHeld || (now - lastVolumeChange >= VOLUME_REPEAT_MS))
+      {
         volumeUp();
         lastVolumeChange = now;
       }
@@ -279,21 +291,28 @@ void loop() {
     }
   }
   
-  if (btnUp.risingEdge()) {
-    if (!upHeld && (now - upPressTime < LONG_PRESS_MS)) {
+  if (btnUp.risingEdge())
+  {
+    if (!upHeld && (now - upPressTime < LONG_PRESS_MS))
+    {
       nextAlbum();
     }
+
     upHeld = false;
   }
   
-  if (btnDown.fallingEdge()) {
+  if (btnDown.fallingEdge())
+  {
     downPressTime = now;
     downHeld = false;
   }
   
-  if (btnDown.read() == LOW) {
-    if (now - downPressTime >= LONG_PRESS_MS) {
-      if (!downHeld || (now - lastVolumeChange >= VOLUME_REPEAT_MS)) {
+  if (btnDown.read() == LOW)
+  {
+    if (now - downPressTime >= LONG_PRESS_MS)
+    {
+      if (!downHeld || (now - lastVolumeChange >= VOLUME_REPEAT_MS))
+      {
         volumeDown();
         lastVolumeChange = now;
       }
@@ -301,36 +320,48 @@ void loop() {
     }
   }
   
-  if (btnDown.risingEdge()) {
-    if (!downHeld && (now - downPressTime < LONG_PRESS_MS)) {
+  if (btnDown.risingEdge())
+  {
+    if (!downHeld && (now - downPressTime < LONG_PRESS_MS))
+    {
       togglePause();
     }
     downHeld = false;
   }
   
-  if (btnRight.fallingEdge()) {
+  if (btnRight.fallingEdge())
+  {
     nextTrack();
   }
   
-  if (btnLeft.fallingEdge()) {
+  if (btnLeft.fallingEdge())
+  {
     unsigned long playTime = now - playStartTime;
     
-    if (now - lastLeftPress < DOUBLE_PRESS_MS) {
+    if (now - lastLeftPress < DOUBLE_PRESS_MS)
+    {
       prevTrack();
       lastLeftPress = 0;
-    } else if (playTime < RESTART_THRESHOLD_MS) {
+    }
+    else if (playTime < RESTART_THRESHOLD_MS)
+    {
       prevTrack();
-    } else {
+    }
+    else
+    {
       restartTrack();
     }
+
     lastLeftPress = now;
   }
   
-  if (isPlaying && !isPaused && !mp3.isPlaying()) {
+  if(isPlaying && !isPaused && !mp3.isPlaying())
+  {
     nextTrack();
   }
   
-  if (millis() - lastDisplayUpdate > 100) {
+  if(millis() - lastDisplayUpdate > 100)
+  {
     lastDisplayUpdate = millis();
     updateDisplay();
     updateLEDs();
@@ -340,92 +371,33 @@ void loop() {
 // ============================================================
 // Volume Control
 // ============================================================
-#define VOLUME_DISPLAY_MIN 0
-#define VOLUME_DISPLAY_MAX 100
-#define HPAMP_STEP_AT_100  2
-#define HPAMP_STEP_AT_75   0
-#define HPAMP_STEP_AT_50  -5
-#define HPAMP_STEP_AT_25  -11
-#define LINEOUT_LOUDEST  13
-#define LINEOUT_QUIETEST 31
+#define VOLUME_MIN 0
+#define VOLUME_MAX 100
+#define HPAMP_DEFAULT -11
+#define LINEOUT_DEFAULT 13
 
-void setVolume(int vol) {
-  currentVolume = constrain(vol, VOLUME_DISPLAY_MIN, VOLUME_DISPLAY_MAX);
+void setVolume(int vol)
+{
+  currentVolume = constrain(vol, VOLUME_MIN, VOLUME_MAX);
   
-  if (currentVolume == 0) {
-    mixerL.gain(0, 0.0);
-    mixerR.gain(0, 0.0);
-    Serial.println("Volume: 0% (muted)");
-  } else {
-    int targetHpStep;
-    int lineOutLevel = LINEOUT_LOUDEST;
-    float mixerGain = 1.0;
+  float mixerGain = currentVolume / 100.0;
     
-    if (currentVolume >= 75) {
-      targetHpStep = map(currentVolume, 75, 100, HPAMP_STEP_AT_75, HPAMP_STEP_AT_100);
-      lineOutLevel = LINEOUT_LOUDEST;
-      mixerGain = 1.0;
-    } else if (currentVolume >= 50) {
-      targetHpStep = map(currentVolume, 50, 75, HPAMP_STEP_AT_50, HPAMP_STEP_AT_75);
-      lineOutLevel = LINEOUT_LOUDEST;
-      mixerGain = 1.0;
-    } else if (currentVolume >= 25) {
-      targetHpStep = map(currentVolume, 25, 50, HPAMP_STEP_AT_25, HPAMP_STEP_AT_50);
-      lineOutLevel = LINEOUT_LOUDEST;
-      mixerGain = 1.0;
-    } else if (currentVolume >= 10) {
-      targetHpStep = HPAMP_STEP_AT_25;
-      lineOutLevel = map(currentVolume, 10, 24, LINEOUT_LOUDEST, LINEOUT_QUIETEST);
-      lineOutLevel = constrain(lineOutLevel, LINEOUT_LOUDEST, LINEOUT_QUIETEST);
-      mixerGain = 1.0;
-    } else {
-      targetHpStep = HPAMP_STEP_AT_25;
-      lineOutLevel = LINEOUT_QUIETEST;
-      mixerGain = currentVolume / 10.0;
-    }
-    
-    mixerL.gain(0, mixerGain);
-    mixerR.gain(0, mixerGain);
-    setHpAmpToStep(targetHpStep);
-    codec.lineOutLevel(lineOutLevel);
-    
-    Serial.print("Volume: ");
-    Serial.print(currentVolume);
-    Serial.print("% (HP step: ");
-    Serial.print(currentHpAmpStep);
-    Serial.print(", lineOut: ");
-    Serial.print(lineOutLevel);
-    Serial.print(", mixer: ");
-    Serial.print(mixerGain, 2);
-    Serial.println(")");
-  }
+  mixerL.gain(0, mixerGain);
+  mixerR.gain(0, mixerGain);
   
   volumeDisplayUntil = millis() + VOLUME_DISPLAY_MS;
 }
 
-void setHpAmpToStep(int targetStep) {
-  targetStep = constrain(targetStep, -11, 4);
-  
-  while (currentHpAmpStep < targetStep) {
-    hpAmpStepUp();
-    currentHpAmpStep++;
-  }
-  while (currentHpAmpStep > targetStep) {
+void setHpAmpToStep(int targetStep)
+{
+  for(int step = 0; step > targetStep; --step)
+  {
     hpAmpStepDown();
-    currentHpAmpStep--;
   }
 }
 
-void hpAmpStepUp() {
-  digitalWrite(HPAMP_VOL_UD, HIGH);
-  digitalWrite(HPAMP_VOL_CLK, LOW);
-  delayMicroseconds(100);
-  digitalWrite(HPAMP_VOL_CLK, HIGH);
-  delayMicroseconds(100);
-  digitalWrite(HPAMP_VOL_CLK, LOW);
-}
-
-void hpAmpStepDown() {
+void hpAmpStepDown()
+{
   digitalWrite(HPAMP_VOL_UD, LOW);
   digitalWrite(HPAMP_VOL_CLK, LOW);
   delayMicroseconds(100);
@@ -434,34 +406,40 @@ void hpAmpStepDown() {
   digitalWrite(HPAMP_VOL_CLK, LOW);
 }
 
-void volumeUp() {
-  if (currentVolume < VOLUME_DISPLAY_MAX) {
-    int step = (currentVolume < 25) ? 1 : 5;
-    setVolume(currentVolume + step);
+void volumeUp()
+{
+  if (currentVolume < VOLUME_MAX)
+  {
+    setVolume(currentVolume + 1);
   }
 }
 
-void volumeDown() {
-  if (currentVolume > VOLUME_DISPLAY_MIN) {
-    int step = (currentVolume <= 25) ? 1 : 5;
-    setVolume(currentVolume - step);
+void volumeDown()
+{
+  if (currentVolume > VOLUME_MIN)
+  {
+    setVolume(currentVolume - 1);
   }
 }
 
 // ============================================================
 // Album/Track Management
 // ============================================================
-void scanAlbums() {
+void scanAlbums()
+{
   albumCount = 0;
   File root = SD.open("/");
   
-  while (albumCount < MAX_ALBUMS) {
+  while (albumCount < MAX_ALBUMS)
+  {
     File entry = root.openNextFile();
     if (!entry) break;
     
-    if (entry.isDirectory()) {
+    if (entry.isDirectory())
+    {
       const char* name = entry.name();
-      if (name[0] != '.') {
+      if (name[0] != '.')
+      {
         strncpy(albums[albumCount].name, name, MAX_NAME_LEN - 1);
         albums[albumCount].name[MAX_NAME_LEN - 1] = '\0';
         albumCount++;
@@ -469,25 +447,28 @@ void scanAlbums() {
         Serial.println(name);
       }
     }
+
     entry.close();
   }
+
   root.close();
   
-  for (int i = 0; i < albumCount - 1; i++) {
-    for (int j = i + 1; j < albumCount; j++) {
-      if (strcasecmp(albums[i].name, albums[j].name) > 0) {
+  for (int i = 0; i < albumCount - 1; i++)
+  {
+    for (int j = i + 1; j < albumCount; j++)
+    {
+      if (strcasecmp(albums[i].name, albums[j].name) > 0)
+      {
         Album temp = albums[i];
         albums[i] = albums[j];
         albums[j] = temp;
       }
     }
   }
-  
-  Serial.print("Total albums: ");
-  Serial.println(albumCount);
 }
 
-void loadAlbumTracks(int albumIndex) {
+void loadAlbumTracks(int albumIndex)
+{
   trackCount = 0;
   currentAlbum = albumIndex;
   currentTrack = 0;
@@ -497,65 +478,73 @@ void loadAlbumTracks(int albumIndex) {
   snprintf(path, sizeof(path), "/%s", albums[albumIndex].name);
   
   File dir = SD.open(path);
-  if (!dir) {
+  if (!dir)
+  {
     Serial.print("Failed to open: ");
     Serial.println(path);
     return;
   }
   
-  while (trackCount < MAX_TRACKS) {
+  while (trackCount < MAX_TRACKS)
+  {
     File entry = dir.openNextFile();
     if (!entry) break;
     
-    if (!entry.isDirectory()) {
+    if (!entry.isDirectory())
+    {
       const char* name = entry.name();
       int len = strlen(name);
       
-      if (len > 4 && strcasecmp(name + len - 4, ".mp3") == 0) {
+      if (len > 4 && strcasecmp(name + len - 4, ".mp3") == 0)
+      {
         strncpy(tracks[trackCount].name, name, MAX_NAME_LEN - 1);
         tracks[trackCount].name[MAX_NAME_LEN - 1] = '\0';
         trackCount++;
       }
     }
+
     entry.close();
   }
+
   dir.close();
   
-  for (int i = 0; i < trackCount - 1; i++) {
-    for (int j = i + 1; j < trackCount; j++) {
-      if (strcasecmp(tracks[i].name, tracks[j].name) > 0) {
+  for(int i = 0; i < trackCount - 1; i++)
+  {
+    for(int j = i + 1; j < trackCount; j++)
+    {
+      if(strcasecmp(tracks[i].name, tracks[j].name) > 0)
+      {
         Track temp = tracks[i];
         tracks[i] = tracks[j];
         tracks[j] = temp;
       }
     }
-  }
-  
-  Serial.print("Loaded ");
-  Serial.print(trackCount);
-  Serial.print(" tracks from ");
-  Serial.println(albums[albumIndex].name);
+  }  
 }
 
 // ============================================================
 // Playback Control
 // ============================================================
-void playTrack(int trackIndex) {
-  if (trackIndex < 0 || trackIndex >= trackCount) return;
+void playTrack(int trackIndex)
+{
+  if(trackIndex < 0 || trackIndex >= trackCount)
+  {
+    return;
+  }
   
   currentTrack = trackIndex;
   scrollOffset = 0;
   lastScrollTime = millis();
   
   char filepath[MAX_NAME_LEN * 2 + 4];
-  snprintf(filepath, sizeof(filepath), "/%s/%s", 
-           albums[currentAlbum].name, tracks[currentTrack].name);
+  snprintf(filepath, sizeof(filepath), "/%s/%s", albums[currentAlbum].name, tracks[currentTrack].name);
   
   Serial.print("Playing: ");
   Serial.println(filepath);
   
   File f = SD.open(filepath);
-  if (f) {
+  if(f)
+  {
     unsigned long fileSize = f.size();
     f.close();
     currentTrackLengthMs = (fileSize * 1000UL) / 24000UL;
@@ -564,7 +553,9 @@ void playTrack(int trackIndex) {
     Serial.print(" bytes, estimated length: ");
     Serial.print(currentTrackLengthMs / 1000);
     Serial.println(" seconds");
-  } else {
+  }
+  else
+  {
     currentTrackLengthMs = 0;
   }
   
@@ -579,79 +570,110 @@ void playTrack(int trackIndex) {
   updateDisplay();
 }
 
-void nextTrack() {
-  if (trackCount == 0) return;
+void nextTrack()
+{
+  if (trackCount == 0)
+  {
+    return;
+  }
   
   int next = currentTrack + 1;
-  if (next >= trackCount) {
+  if(next >= trackCount)
+  {
     int nextAlbumIdx = (currentAlbum + 1) % albumCount;
     loadAlbumTracks(nextAlbumIdx);
     next = 0;
   }
+
   playTrack(next);
 }
 
-void prevTrack() {
+void prevTrack()
+{
   if (trackCount == 0) return;
   
   int prev = currentTrack - 1;
-  if (prev < 0) {
+  if (prev < 0)
+  {
     int prevAlbumIdx = (currentAlbum - 1 + albumCount) % albumCount;
     loadAlbumTracks(prevAlbumIdx);
     prev = trackCount - 1;
     if (prev < 0) prev = 0;
   }
+
   playTrack(prev);
 }
 
-void restartTrack() {
+void restartTrack()
+{
   playTrack(currentTrack);
 }
 
-void nextAlbum() {
-  if (albumCount == 0) return;
+void nextAlbum()
+{
+  if(albumCount == 0)
+  {
+    return;
+  }
   
   mp3.stop();
   int next = (currentAlbum + 1) % albumCount;
   loadAlbumTracks(next);
   
-  if (trackCount > 0) {
+  if(trackCount > 0) 
+  {
     playTrack(0);
-  } else {
+  }
+  else
+  {
     isPlaying = false;
     updateDisplay();
   }
 }
 
-void prevAlbum() {
-  if (albumCount == 0) return;
+void prevAlbum()
+{
+  if(albumCount == 0)
+  {
+    return;
+  }
   
   mp3.stop();
   int prev = (currentAlbum - 1 + albumCount) % albumCount;
   loadAlbumTracks(prev);
   
-  if (trackCount > 0) {
+  if(trackCount > 0)
+  {
     playTrack(0);
-  } else {
+  }
+  else
+  {
     isPlaying = false;
     updateDisplay();
   }
 }
 
-void togglePause() {
-  if (!isPlaying) {
-    if (trackCount > 0) {
+void togglePause() 
+{
+  if(!isPlaying) 
+  {
+    if(trackCount > 0) 
+    {
       playTrack(currentTrack);
     }
+
     return;
   }
   
   isPaused = !isPaused;
   
-  if (isPaused) {
+  if(isPaused)
+  {
     mp3.pause(true);
     Serial.println("Paused");
-  } else {
+  }
+  else
+  {
     mp3.pause(false);
     Serial.println("Resumed");
   }
@@ -662,18 +684,23 @@ void togglePause() {
 // ============================================================
 // Display
 // ============================================================
-String getDisplayName(const char* filename) {
+String getDisplayName(const char* filename)
+{
   String name = String(filename);
   
-  if (name.endsWith(".mp3") || name.endsWith(".MP3")) {
+  if(name.endsWith(".mp3") || name.endsWith(".MP3"))
+  {
     name = name.substring(0, name.length() - 4);
   }
   
   unsigned int start = 0;
-  while (start < name.length() && (isDigit(name[start]) || name[start] == '_' || name[start] == '-' || name[start] == ' ')) {
+  while(start < name.length() && (isDigit(name[start]) || name[start] == '_' || name[start] == '-' || name[start] == ' '))
+  {
     start++;
   }
-  if (start > 0 && start < name.length()) {
+
+  if(start > 0 && start < name.length())
+  {
     name = name.substring(start);
   }
   
@@ -682,7 +709,8 @@ String getDisplayName(const char* filename) {
   return name;
 }
 
-void showVolumeOverlay() {
+void showVolumeOverlay()
+{
   display.setTextSize(1);
   display.setCursor(40, 0);
   display.print("VOLUME");
@@ -694,21 +722,26 @@ void showVolumeOverlay() {
   
   display.drawRect(4, 26, 120, 6, SSD1306_WHITE);
   int barWidth = (currentVolume * 116) / 100;
-  if (barWidth > 0) {
+  if (barWidth > 0)
+  {
     display.fillRect(6, 28, barWidth, 2, SSD1306_WHITE);
   }
   
   display.setTextSize(1);
-  if (currentVolume == 0) {
+
+  if(currentVolume == 0)
+  {
     display.setCursor(0, 10);
     display.print("X");
   }
 }
 
-void updateDisplay() {
+void updateDisplay()
+{
   display.clearDisplay();
   
-  if (millis() < volumeDisplayUntil) {
+  if(millis() < volumeDisplayUntil) 
+  {
     showVolumeOverlay();
     display.display();
     return;
@@ -721,29 +754,37 @@ void updateDisplay() {
   String albumName = getDisplayName(albums[currentAlbum].name);
   albumDisplay += albumName;
   
-  if (albumDisplay.length() > 21) {
+  if(albumDisplay.length() > 21)
+  {
     albumDisplay = albumDisplay.substring(0, 20) + "~";
   }
   display.println(albumDisplay);
   
   display.setCursor(0, 10);
   
-  if (trackCount == 0 || tracks[currentTrack].name[0] == '\0') {
+  if(trackCount == 0 || tracks[currentTrack].name[0] == '\0')
+  {
     display.println("Loading...");
-  } else {
+  }
+  else
+  {
     String trackName = getDisplayName(tracks[currentTrack].name);
     
-    if (trackName.length() > 21) {
-      if (millis() - lastScrollTime > 300) {
+    if(trackName.length() > 21)
+    {
+      if(millis() - lastScrollTime > 300)
+      {
         lastScrollTime = millis();
         scrollOffset++;
         if (scrollOffset > (int)trackName.length() - 18) {
           scrollOffset = -3;
         }
       }
+
       int offset = max(0, scrollOffset);
       trackName = trackName.substring(offset, offset + 21);
     }
+
     display.println(trackName);
   }
   
@@ -753,33 +794,51 @@ void updateDisplay() {
   display.print(trackInfo);
   
   display.setCursor(36, 20);
-  if (isPaused) {
+  if (isPaused)
+  {
     display.print("||");
-  } else if (isPlaying) {
+  } 
+  else if (isPlaying)
+  {
     display.print("> ");
-  } else {
+  }
+  else
+  {
     display.print("[]");
   }
   
-  if (isPlaying) {
+  if(isPlaying)
+  {
     unsigned long elapsedMs = millis() - playStartTime;
     int totalSecs = elapsedMs / 1000;
     int mins = totalSecs / 60;
     int secs = totalSecs % 60;
     
     display.setCursor(50, 20);
-    if (mins < 10) display.print("0");
+    if(mins < 10)
+    {
+      display.print("0");
+    }
+
     display.print(mins);
     display.print(":");
-    if (secs < 10) display.print("0");
+
+    if(secs < 10)
+    {
+      display.print("0");
+    }
+
     display.print(secs);
-  } else {
+  }
+  else
+  {
     display.setCursor(50, 20);
     display.print("--:--");
   }
   
   // Joust-style bird animation
-  if (isPlaying && !isPaused) {
+  if(isPlaying && !isPaused)
+  {
     int cycleTime = 4000;
     int phase = (millis() % cycleTime);
     int xPos;
@@ -787,10 +846,13 @@ void updateDisplay() {
     int yBase = 23;  // Centered on bottom line
     bool facingRight;
     
-    if (phase < cycleTime / 2) {
+    if(phase < cycleTime / 2)
+    {
       xPos = 90 + (phase * 28) / (cycleTime / 2);
       facingRight = true;
-    } else {
+    }
+    else
+    {
       xPos = 118 - ((phase - cycleTime / 2) * 28) / (cycleTime / 2);
       facingRight = false;
     }
@@ -808,7 +870,8 @@ void updateDisplay() {
     
     int yHop = yBase + (int)lift;
     
-    if (facingRight) {
+    if(facingRight)
+    {
       // Body (smaller, 3x2)
       display.fillRect(xPos, yHop + 2, 3, 2, SSD1306_WHITE);
       // Head
@@ -819,20 +882,27 @@ void updateDisplay() {
       display.drawPixel(xPos + 3, yHop + 1, SSD1306_BLACK);
       // Tail
       display.drawPixel(xPos - 1, yHop + 2, SSD1306_WHITE);
+
       // Wing (more dramatic flap)
-      if (wingUp) {
+      if(wingUp)
+      {
         display.drawPixel(xPos + 1, yHop + 1, SSD1306_WHITE);
         display.drawPixel(xPos + 1, yHop, SSD1306_WHITE);
         display.drawPixel(xPos, yHop - 1, SSD1306_WHITE);
         display.drawPixel(xPos + 1, yHop - 1, SSD1306_WHITE);
-      } else {
+      }
+      else
+      {
         display.drawPixel(xPos + 1, yHop + 4, SSD1306_WHITE);
         display.drawPixel(xPos, yHop + 5, SSD1306_WHITE);
         display.drawPixel(xPos + 1, yHop + 5, SSD1306_WHITE);
       }
+
       // Legs (tucked while flying)
       display.drawPixel(xPos + 1, yHop + 4, SSD1306_WHITE);
-    } else {
+    }
+    else
+    {
       // Body (smaller, 3x2)
       display.fillRect(xPos, yHop + 2, 3, 2, SSD1306_WHITE);
       // Head
@@ -844,16 +914,20 @@ void updateDisplay() {
       // Tail
       display.drawPixel(xPos + 3, yHop + 2, SSD1306_WHITE);
       // Wing (more dramatic flap)
-      if (wingUp) {
+      if(wingUp)
+      {
         display.drawPixel(xPos + 1, yHop + 1, SSD1306_WHITE);
         display.drawPixel(xPos + 1, yHop, SSD1306_WHITE);
         display.drawPixel(xPos + 2, yHop - 1, SSD1306_WHITE);
         display.drawPixel(xPos + 1, yHop - 1, SSD1306_WHITE);
-      } else {
+      }
+      else
+      {
         display.drawPixel(xPos + 1, yHop + 4, SSD1306_WHITE);
         display.drawPixel(xPos + 2, yHop + 5, SSD1306_WHITE);
         display.drawPixel(xPos + 1, yHop + 5, SSD1306_WHITE);
       }
+
       // Legs (tucked while flying)
       display.drawPixel(xPos + 1, yHop + 4, SSD1306_WHITE);
     }
@@ -896,8 +970,7 @@ void setupHeadphoneAmp() {
   digitalWrite(HPAMP_SHUTDOWN, LOW);
   
   currentHpAmpStep = 0;
-  
-  setVolume(currentVolume);
-  
+  setHpAmpToStep(HPAMP_DEFAULT);  
+
   Serial.println("Headphone amp initialized");
 }
