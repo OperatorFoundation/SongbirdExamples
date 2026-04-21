@@ -23,10 +23,39 @@
  *   LED1 - Pulses while playing
  *   LED2 - Solid when paused, off when playing
  * 
+ * Required Board Package:
+ *   Teensyduino
+ *     This is an add-on for the Arduino IDE that adds support for Teensy boards. 
+ *   Arduino IDE 2.x (recommended)
+ *     Teensyduino is available as a board package through the Board Manager. 
+ *     In the Arduino IDE, go to Tools → Board → Boards Manager, search for "Teensy," and install the package by PJRC. 
+ *     That's it — no separate installer needed.
+ *   Ardcuino IDE 1.x (legacy)
+ *     For the older IDE, you need to run a separate installer:
+ *     Download the Teensyduino installer from https://www.pjrc.com/teensy/td_download.html
+ *     Run the installer and point it to your existing Arduino IDE installation directory
+ *     It will patch the IDE with Teensy support, libraries, and tools
+ *     
  * Required Libraries:
- *   - Arduino-Teensy-Codec-lib (Frank Boesing)
- *   - Adafruit_SSD1306
- *   - Adafruit_GFX
+ *  Arduino-Teensy-Codec-lib 
+ *    Option A
+ *      Download: https://github.com/FrankBoesing/Arduino-Teensy-Codec-lib
+ *      Install: Sketch → Include Library → Add .ZIP Library
+ *    Option B - manually install library
+ *      git clone https://github.com/FrankBoesing/Arduino-Teensy-Codec-lib.git
+ *      Rename the folder to Arduino-Teensy-Codec-lib (remove any -master suffix)
+ *      Move it into your Arduino libraries folder:
+ *        Windows: Documents\Arduino\libraries\
+ *        macOS: ~/Documents/Arduino/libraries/
+ *        Linux: ~/Arduino/libraries/
+ *      Restart the Arduino IDE
+ * 
+ *  Adafruit SSD1306
+ *    Install via Library Manager: "Adafruit SSD1306"
+ * 
+ *  Adafruit GFX Library
+ *    Install via Library Manager: "Adafruit GFX Library"
+ *   
  */
 
 #include <Audio.h>
